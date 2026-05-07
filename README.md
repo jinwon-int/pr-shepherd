@@ -6,6 +6,7 @@ Small operational CLI to watch and conservatively repair `openclaw/openclaw#7826
 
 ```bash
 node pr-shepherd.mjs check --config config.json
+node pr-shepherd.mjs readiness --config config.json
 node pr-shepherd.mjs repair --config config.json --dry-run
 node pr-shepherd.mjs repair --config config.json
 ```
@@ -49,7 +50,7 @@ git fetch origin fix/telegram-outbound-visible-receipts
 git fetch upstream main
 ```
 
-The CLI requires a clean worktree before mutation.
+The CLI requires a clean worktree before mutation. Run `readiness` before an operator-approved live repair to verify the configured worktree is present, clean, not mid-rebase/merge/cherry-pick, has expected remotes, has focused checks configured, has a conservative conflict policy, has notification state suitable for dedupe, and is below the rolling auto-push limit. The command is non-mutating and exits non-zero when any readiness gate fails.
 
 ## Focused verification
 

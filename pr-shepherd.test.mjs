@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { classifyChecks, classifyPr, notificationKey } from './pr-shepherd.mjs';
+import { classifyChecks, classifyPr, notificationKey, recentAutoPushes, redact, worktreeReadiness } from './pr-shepherd.mjs';
 
 const base = {
   number: 78261,
@@ -52,4 +56,60 @@ test('classifyChecks treats success/skipped/neutral as non-failures', () => {
   ]);
   assert.equal(c.failed.length, 0);
   assert.equal(c.pending.length, 0);
+});
+
+test('redact removes GitHub tokens and secret values', () => {
+  const text = 'token=ghp_abcdefghijklmnopqrstuvwxyz123456 secret:supersecret password=hunter2';
+  const redacted = redact(text);
+  assert.doesNotMatch(redacted, /ghp_|supersecret|hunter2/);
+  assert.match(redacted, /\[REDACTED/);
+});
+
+test('recentAutoPushes keeps only pushes from the last 24 hours', () => {
+  const now = Date.parse('2026-05-07T12:00:00Z');
+  const pushes = recentAutoPushes({
+    autoPushes: [
+      { at: '2026-05-07T11:00:00Z' },
+      { at: '2026-05-06T11:59:59Z' },
+    ],
+  }, now);
+  assert.equal(pushes.length, 1);
+});
+
+test('worktreeReadiness reports a missing worktree as not ready', () => {
+  const result = worktreeReadiness({
+    worktreePath: join(tmpdir(), 'definitely-missing-pr-shepherd-worktree'),
+    autoPushLimit24h: 5,
+    remotes: {},
+    knownSafeConflicts: { changelog: { path: 'CHANGELOG.md', knownPrLineNeedle: 'entry' } },
+    focusedChecks: ['npm test'],
+  }, {});
+  assert.equal(result.ok, false);
+  assert.equal(result.checks.find((c) => c.name === 'worktree-exists').ok, false);
+});
+
+test('worktreeReadiness accepts a clean worktree with matching remotes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-ready-'));
+  const git = (args) => {
+    const res = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.equal(res.status, 0, `${args.join(' ')}\n${res.stdout}${res.stderr}`);
+  };
+  git(['init']);
+  git(['remote', 'add', 'origin', 'https://github.com/example/fork.git']);
+  git(['remote', 'add', 'upstream', 'https://github.com/example/upstream.git']);
+
+  const result = worktreeReadiness({
+    worktreePath: dir,
+    lockPath: join(dir, 'lock'),
+    staleLockMs: 1000,
+    autoPushLimit24h: 5,
+    remotes: {
+      origin: 'https://github.com/example/fork.git',
+      upstream: 'https://github.com/example/upstream.git',
+    },
+    knownSafeConflicts: { changelog: { path: 'CHANGELOG.md', knownPrLineNeedle: 'entry' } },
+    focusedChecks: ['npm test'],
+  }, {});
+
+  assert.equal(result.ok, true, JSON.stringify(result.checks, null, 2));
 });

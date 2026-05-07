@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -10,13 +10,13 @@ export const PR_FIELDS = [
 ];
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run]`);
+  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs readiness --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run]`);
   process.exit(exitCode);
 }
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['check', 'repair'].includes(cmd)) usage();
+  if (!cmd || !['check', 'readiness', 'repair'].includes(cmd)) usage();
   const args = { cmd, dryRun: false };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
@@ -45,6 +45,8 @@ function redact(text) {
     .replace(/gh[pousr]_[A-Za-z0-9_]+/g, '[REDACTED_GITHUB_TOKEN]')
     .replace(/(token|secret|password|authorization)([=:]\s*)[^\s]+/ig, '$1$2[REDACTED]');
 }
+
+export { redact };
 
 function run(cmd, args = [], opts = {}) {
   const res = spawnSync(cmd, args, {
@@ -220,8 +222,73 @@ function ensureWorktree(target) {
 
 function shellQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 
-function recentAutoPushes(state, now = Date.now()) {
+function pathLabel(path) {
+  return path ? basename(path) || '(configured path)' : '(unset)';
+}
+
+export function recentAutoPushes(state, now = Date.now()) {
   return (state.autoPushes || []).filter((p) => now - Date.parse(p.at) < 24 * 60 * 60 * 1000);
+}
+
+export function worktreeReadiness(target, state = {}) {
+  const checks = [];
+  const add = (name, ok, detail) => checks.push({ name, ok, detail: redact(detail || '') });
+  const configuredRemotes = target.remotes || {};
+
+  add('target-enabled', !state.disabled, state.disabled ? 'state.disabled is true' : 'target is enabled');
+
+  const pushes24h = recentAutoPushes(state);
+  const pushLimit = Number.isFinite(target.autoPushLimit24h) ? target.autoPushLimit24h : Infinity;
+  add('auto-push-limit', pushes24h.length < pushLimit, `${pushes24h.length}/${pushLimit} pushes in the last 24h`);
+
+  if (target.lockPath && existsSync(target.lockPath)) {
+    const age = Date.now() - statSync(target.lockPath).mtimeMs;
+    const stale = target.staleLockMs > 0 && age > target.staleLockMs;
+    add('lock-available', stale, stale ? `stale lock can be reclaimed (${pathLabel(target.lockPath)})` : `lock is currently held (${pathLabel(target.lockPath)})`);
+  } else {
+    add('lock-available', true, 'no active lock file');
+  }
+
+  const safeChangelog = target.knownSafeConflicts?.changelog;
+  add('conflict-policy-conservative', Boolean(safeChangelog?.path && safeChangelog.path === 'CHANGELOG.md' && safeChangelog.knownPrLineNeedle), safeChangelog?.path ? `only configured safe path: ${safeChangelog.path}` : 'no known safe conflict policy configured');
+  add('focused-checks-configured', Array.isArray(target.focusedChecks) && target.focusedChecks.length > 0, `${target.focusedChecks?.length || 0} focused checks configured`);
+  add('notification-dedupe-state', Object.hasOwn(state, 'lastNotificationKey') || state.lastRunAt === null || state.lastRunAt === undefined || typeof state.lastRunAt === 'string', state.lastNotificationKey ? 'lastNotificationKey present' : 'state can store lastNotificationKey on first notification');
+
+  if (!target.worktreePath || !existsSync(target.worktreePath)) {
+    add('worktree-exists', false, `configured worktree is missing (${pathLabel(target.worktreePath)})`);
+    return { ok: checks.every((c) => c.ok), checks };
+  }
+  add('worktree-exists', true, `configured worktree exists (${pathLabel(target.worktreePath)})`);
+
+  const inside = run('git', ['rev-parse', '--is-inside-work-tree'], { cwd: target.worktreePath, allowFailure: true });
+  add('worktree-is-git-repo', inside.status === 0 && inside.stdout.trim() === 'true', inside.output.trim() || 'not a git worktree');
+
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') return { ok: checks.every((c) => c.ok), checks };
+
+  const status = runShell('git status --porcelain', target.worktreePath, { allowFailure: true });
+  const statusLines = status.stdout.trim().split('\n').filter(Boolean);
+  add('worktree-clean', status.status === 0 && statusLines.length === 0, status.status === 0 ? (statusLines.length ? statusLines.join('\n').slice(0, 4000) : 'clean') : status.output.slice(-4000));
+
+  const gitDir = run('git', ['rev-parse', '--git-dir'], { cwd: target.worktreePath, allowFailure: true }).stdout.trim();
+  const blockedStates = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'rebase-merge', 'rebase-apply']
+    .filter((p) => gitDir && existsSync(resolve(target.worktreePath, gitDir, p)));
+  add('no-in-progress-git-operation', blockedStates.length === 0, blockedStates.length ? blockedStates.join(', ') : 'no merge/rebase/cherry-pick state');
+
+  for (const [name, expected] of Object.entries(configuredRemotes)) {
+    const actual = run('git', ['remote', 'get-url', name], { cwd: target.worktreePath, allowFailure: true });
+    if (actual.status !== 0) add(`remote-${name}`, false, `missing remote ${name}`);
+    else add(`remote-${name}`, actual.stdout.trim() === expected, actual.stdout.trim() === expected ? 'matches config' : `expected ${expected}, got ${actual.stdout.trim()}`);
+  }
+
+  return { ok: checks.every((c) => c.ok), checks };
+}
+
+function handleReadiness(target) {
+  const state = { ...defaultState(target), ...loadJson(target.statePath, {}) };
+  const readiness = worktreeReadiness(target, state);
+  console.log(JSON.stringify({ target: target.id, ok: readiness.ok, checks: readiness.checks }, null, 2));
+  if (!readiness.ok) process.exitCode = 2;
+  return readiness;
 }
 
 function resolveChangelogConflict(target) {
@@ -347,6 +414,7 @@ export function main(argv = process.argv.slice(2)) {
   const cfg = loadConfig(args.config);
   const target = pickTarget(cfg, args.target);
   if (args.cmd === 'check') handleCheck(target);
+  else if (args.cmd === 'readiness') handleReadiness(target);
   else handleRepair(target, args.dryRun);
 }
 

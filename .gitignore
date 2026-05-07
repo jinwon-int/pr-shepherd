@@ -4,3 +4,14 @@ coverage/
 .DS_Store
 state/
 *.lock
+
+# OpenClaw runner/bootstrap context. These files can contain local persona,
+# workspace, or operator-specific details and must not be committed from A2A
+# repair worktrees.
+/AGENTS.md
+/SOUL.md
+/USER.md
+/TOOLS.md
+/HEARTBEAT.md
+/IDENTITY.md
+/.openclaw/
