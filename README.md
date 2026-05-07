@@ -195,6 +195,22 @@ Deploy routine automation with the read-only `check` command. A check run querie
 updates the target state file, and emits deduplicated notifications; it does not touch the watched
 worktree, rebase, write conflict artifacts, or push branches.
 
+For a canary rollout, enable check-only automation for one low-risk target before installing aggregate
+timers or allowing any repair workflow. The canary should use the same config shape, notifier, lock,
+and state paths planned for production, but it should run only `check --target <id>` with read-only
+GitHub credentials. Treat a quiet canary as validation of monitoring and notification plumbing only;
+it is not approval to run `repair`.
+
+Canary checklist:
+
+1. Pick one target id and confirm its `statePath` and `lockPath` are unique and writable.
+2. Run `validate`, then one manual `check --target <id>` and inspect the JSON summary plus notifier output.
+3. Install `pr-shepherd@<id>.timer` using the example unit, or an equivalent scheduler whose command is
+   exactly `check --config <repo>/config.json --target <id>`.
+4. Observe at least two timer intervals with no duplicate notifications, lock contention, or state errors.
+5. Only after the canary is stable, add more check-only targets or an aggregate `--all` checker. Keep live
+   `repair` disabled until a separate explicit operator approval.
+
 Recommended check-only pattern:
 
 ```bash
