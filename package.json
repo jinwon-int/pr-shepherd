@@ -1,5 +1,5 @@
 {
-  "name": "@jinwon-int/openclaw-pr-shepherd",
+  "name": "@jinwon-int/pr-shepherd",
   "version": "0.1.0",
   "private": true,
   "type": "module",

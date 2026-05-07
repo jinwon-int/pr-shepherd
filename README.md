@@ -13,7 +13,7 @@ node pr-shepherd.mjs repair --config config.json
 ## Safety defaults
 
 - State file: `/root/.openclaw/state/pr-shepherd/78261.json`
-- Lock file: `/tmp/openclaw-pr-shepherd-78261.lock`
+- Lock file: `/tmp/pr-shepherd-78261.lock`
 - Duplicate runs are blocked by an exclusive lock.
 - Auto pushes are limited to 5 per rolling 24h.
 - Push uses only `git push --force-with-lease=<branch>:<expected-remote-head>`.
