@@ -1,0 +1,47 @@
+{
+  "targets": [
+    {
+      "id": "openclaw-78261",
+      "pr": "openclaw/openclaw#78261",
+      "owner": "openclaw",
+      "repo": "openclaw",
+      "number": 78261,
+      "url": "https://github.com/openclaw/openclaw/pull/78261",
+      "headOwner": "jinon86",
+      "headBranch": "fix/telegram-outbound-visible-receipts",
+      "baseOwner": "openclaw",
+      "baseBranch": "main",
+      "worktreePath": "/root/.openclaw/workspace/openclaw-pr-78261",
+      "statePath": "/root/.openclaw/state/pr-shepherd/78261.json",
+      "lockPath": "/tmp/openclaw-pr-shepherd-78261.lock",
+      "staleLockMs": 1800000,
+      "autoPushLimit24h": 5,
+      "pendingNotifyAfterMs": 3600000,
+      "remotes": {
+        "origin": "git@github.com:jinon86/openclaw.git",
+        "upstream": "https://github.com/openclaw/openclaw.git"
+      },
+      "knownSafeConflicts": {
+        "changelog": {
+          "path": "CHANGELOG.md",
+          "knownPrLineNeedle": "Telegram/Plugin SDK: expose delivery.providerAccepted"
+        }
+      },
+      "focusedChecks": [
+        "pnpm test extensions/telegram/src/channel.message-adapter.test.ts extensions/telegram/src/outbound-adapter.test.ts extensions/telegram/src/telegram-outbound.test.ts src/channels/message/outbound-bridge.test.ts",
+        "pnpm plugin-sdk:api:check",
+        "pnpm check:no-conflict-markers",
+        "git diff --check"
+      ],
+      "optionalChecks": [
+        {
+          "command": "pnpm check:test-types",
+          "retryAfterInstallOnMissingDependency": true
+        }
+      ],
+      "notify": {
+        "mode": "stdout"
+      }
+    }
+  ]
+}
