@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { classifyChecks, classifyPr, notificationKey } from './pr-shepherd.mjs';
+import {
+  buildConflictArtifactPayload,
+  classifyChecks,
+  classifyConflictSet,
+  classifyPr,
+  conflictSetKey,
+  notificationKey,
+  resolveChangelogConflict,
+} from './pr-shepherd.mjs';
 
 const base = {
   number: 78261,
@@ -52,4 +64,106 @@ test('classifyChecks treats success/skipped/neutral as non-failures', () => {
   ]);
   assert.equal(c.failed.length, 0);
   assert.equal(c.pending.length, 0);
+});
+
+const conflictPolicyTarget = {
+  id: 'openclaw-78261',
+  pr: 'openclaw/openclaw#78261',
+  url: 'https://github.com/openclaw/openclaw/pull/78261',
+  baseBranch: 'main',
+  remotes: {
+    origin: 'https://x-access-token:TOKEN_EXAMPLE_REDACT_ME@github.com/example/private.git',
+  },
+  conflictPolicy: {
+    autoSafe: [
+      { path: 'CHANGELOG.md', resolver: 'merge-changelog-top-entry', needle: 'Telegram/Plugin SDK: expose delivery.providerAccepted' },
+    ],
+    codeAssisted: [
+      'extensions/telegram/src/outbound-adapter.ts',
+      'extensions/telegram/src/send.ts',
+    ],
+    humanOnly: ['pnpm-lock.yaml'],
+  },
+};
+
+test('classifies autoSafe CHANGELOG conflict', () => {
+  const c = classifyConflictSet(['CHANGELOG.md'], conflictPolicyTarget);
+  assert.equal(c.tier, 'autoSafe');
+  assert.equal(c.autoPushAllowed, true);
+  assert.equal(c.pushBlocked, false);
+});
+
+test('classifies codeAssisted TypeScript conflict with push blocked by default', () => {
+  const c = classifyConflictSet(['extensions/telegram/src/outbound-adapter.ts'], conflictPolicyTarget);
+  assert.equal(c.tier, 'codeAssisted');
+  assert.equal(c.requiresApproval, true);
+  assert.equal(c.pushBlocked, true);
+});
+
+test('classifies lockfile conflict as humanOnly', () => {
+  const c = classifyConflictSet(['pnpm-lock.yaml'], conflictPolicyTarget);
+  assert.equal(c.tier, 'humanOnly');
+  assert.equal(c.pushBlocked, true);
+});
+
+test('unlisted conflict paths escalate to humanOnly', () => {
+  const c = classifyConflictSet(['src/auth/permissions.ts'], conflictPolicyTarget);
+  assert.equal(c.tier, 'humanOnly');
+  assert.equal(c.entries[0].reason, 'unlisted');
+});
+
+test('conflict set key includes head, base, and sorted conflict paths', () => {
+  const pr = { headRefOid: 'head-a', baseRefName: 'main' };
+  assert.equal(
+    conflictSetKey(pr, 'base-a', ['b.ts', 'a.ts']),
+    conflictSetKey(pr, 'base-a', ['a.ts', 'b.ts']),
+  );
+  assert.notEqual(conflictSetKey(pr, 'base-a', ['a.ts']), conflictSetKey(pr, 'base-b', ['a.ts']));
+});
+
+test('source never uses plain force push', () => {
+  const source = readFileSync(new URL('./pr-shepherd.mjs', import.meta.url), 'utf8');
+  assert.equal(source.includes("'--force'"), false);
+  assert.match(source, /--force-with-lease=/);
+});
+
+test('conflict artifacts omit secrets and private worktree details', () => {
+  const payload = buildConflictArtifactPayload(
+    { ...conflictPolicyTarget, worktreePath: '/private/worktree', statePath: '/private/state.json' },
+    { headRefOid: 'head-a', url: 'https://github.com/openclaw/openclaw/pull/78261' },
+    classifyConflictSet(['extensions/telegram/src/outbound-adapter.ts'], conflictPolicyTarget),
+    ['extensions/telegram/src/outbound-adapter.ts'],
+    'conflict:head-a:base-a:extensions/telegram/src/outbound-adapter.ts',
+  );
+  const json = JSON.stringify(payload);
+  assert.equal(json.includes('TOKEN_EXAMPLE_REDACT_ME'), false);
+  assert.equal(json.includes('/private/'), false);
+});
+
+test('autoSafe CHANGELOG resolver preserves both sides and removes conflict markers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-changelog-'));
+  try {
+    spawnSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+    writeFileSync(join(dir, 'CHANGELOG.md'), [
+      '<<<<<<< HEAD',
+      '- Telegram/Plugin SDK: expose delivery.providerAccepted',
+      '=======',
+      '- Upstream release note',
+      '>>>>>>> upstream/main',
+      '',
+    ].join('\n'));
+    assert.equal(resolveChangelogConflict({ worktreePath: dir }, {
+      path: 'CHANGELOG.md',
+      resolver: 'merge-changelog-top-entry',
+      needle: 'Telegram/Plugin SDK: expose delivery.providerAccepted',
+    }), true);
+    const resolved = readFileSync(join(dir, 'CHANGELOG.md'), 'utf8');
+    assert.match(resolved, /Telegram\/Plugin SDK: expose delivery\.providerAccepted/);
+    assert.match(resolved, /Upstream release note/);
+    assert.equal(resolved.includes('<<<<<<<'), false);
+    assert.equal(resolved.includes('======='), false);
+    assert.equal(resolved.includes('>>>>>>>'), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

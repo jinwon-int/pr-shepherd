@@ -8,6 +8,7 @@ Small operational CLI to watch and conservatively repair `openclaw/openclaw#7826
 node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs repair --config config.json --dry-run
 node pr-shepherd.mjs repair --config config.json
+node pr-shepherd.mjs repair --config config.json --artifact-dir ./artifacts --no-keep-failed-rebase-worktree
 ```
 
 ## Safety defaults
@@ -20,7 +21,10 @@ node pr-shepherd.mjs repair --config config.json
 - The CLI refuses to push if the remote head changed after fetch.
 - CI failures are reported, never auto-fixed.
 - Complex conflicts are escalated.
-- Only a conservative `CHANGELOG.md` conflict path is eligible for auto-resolution.
+- Conflict handling is tiered by target `conflictPolicy`:
+  - `autoSafe`: deterministic resolvers only; focused checks must pass before the existing `--force-with-lease` push path runs.
+  - `codeAssisted`: PR-owned/source conflicts are diagnosed and written to an artifact, but push is blocked by default unless an operator explicitly approves assisted follow-up.
+  - `humanOnly`: lockfiles, broad generated/security-sensitive files, unlisted paths, or unrelated subsystems stop immediately for manual handling.
 - Merged PRs mark state as `disabled`.
 
 ## Status classification
