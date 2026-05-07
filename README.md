@@ -7,7 +7,7 @@ Small operational CLI to watch and conservatively repair `openclaw/openclaw#7826
 ```bash
 node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs repair --config config.json --dry-run
-node pr-shepherd.mjs repair --config config.json
+node pr-shepherd.mjs repair --config config.json --approve-live-push
 ```
 
 ## Safety defaults
@@ -15,6 +15,7 @@ node pr-shepherd.mjs repair --config config.json
 - State file: `/root/.openclaw/state/pr-shepherd/78261.json`
 - Lock file: `/tmp/pr-shepherd-78261.lock`
 - Duplicate runs are blocked by an exclusive lock.
+- Live repair refuses to push unless `--approve-live-push` is present.
 - Auto pushes are limited to 5 per rolling 24h.
 - Push uses only `git push --force-with-lease=<branch>:<expected-remote-head>`.
 - The CLI refuses to push if the remote head changed after fetch.
@@ -87,7 +88,7 @@ The message is passed as `PR_SHEPHERD_MESSAGE`. The notifier must not print secr
 
 ## Suggested timer
 
-Run `check` every 5-10 minutes. Run `repair --dry-run` or live `repair` only after the worktree is prepared and operator policy is confirmed.
+Run `check` every 5-10 minutes. Run `repair --dry-run` for non-mutating rebase simulation. Run live `repair --approve-live-push` only after the worktree is prepared and an operator gives explicit final approval.
 
 Example unit files are included but not installed:
 

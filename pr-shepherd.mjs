@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, readFileSync, writeFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -10,19 +11,20 @@ export const PR_FIELDS = [
 ];
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run]`);
+  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run] [--approve-live-push]`);
   process.exit(exitCode);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const [cmd, ...rest] = argv;
   if (!cmd || !['check', 'repair'].includes(cmd)) usage();
-  const args = { cmd, dryRun: false };
+  const args = { cmd, dryRun: false, approveLivePush: false };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === '--config') args.config = rest[++i];
     else if (a === '--target') args.target = rest[++i];
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--approve-live-push') args.approveLivePush = true;
     else if (a === '--help' || a === '-h') usage(0);
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -40,7 +42,7 @@ function saveJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
-function redact(text) {
+export function redact(text) {
   return String(text ?? '')
     .replace(/gh[pousr]_[A-Za-z0-9_]+/g, '[REDACTED_GITHUB_TOKEN]')
     .replace(/(token|secret|password|authorization)([=:]\s*)[^\s]+/ig, '$1$2[REDACTED]');
@@ -57,7 +59,7 @@ function run(cmd, args = [], opts = {}) {
   const out = `${res.stdout || ''}${res.stderr || ''}`;
   if (res.status !== 0 && !opts.allowFailure) {
     const printable = opts.shell ? cmd : [cmd, ...args].join(' ');
-    throw new Error(`Command failed (${res.status}): ${printable}\n${redact(out).slice(-8000)}`);
+    throw new Error(`Command failed (${res.status}): ${redact(printable)}\n${redact(out).slice(-8000)}`);
   }
   return { status: res.status, stdout: res.stdout || '', stderr: res.stderr || '', output: out };
 }
@@ -155,7 +157,7 @@ export function notificationKey(kind, pr, checks, extra = '') {
 function notify(target, state, key, message, force = false) {
   if (!force && state.lastNotificationKey === key) return false;
   state.lastNotificationKey = key;
-  const line = `[pr-shepherd:${target.id}] ${message}`;
+  const line = redact(`[pr-shepherd:${target.id}] ${message}`);
   if (target.notify?.mode === 'none') return true;
   if (target.notify?.mode === 'command' && Array.isArray(target.notify.command)) {
     const [cmd, ...args] = target.notify.command;
@@ -220,14 +222,14 @@ function ensureWorktree(target) {
 
 function shellQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 
-function recentAutoPushes(state, now = Date.now()) {
+export function recentAutoPushes(state, now = Date.now()) {
   return (state.autoPushes || []).filter((p) => now - Date.parse(p.at) < 24 * 60 * 60 * 1000);
 }
 
-function resolveChangelogConflict(target) {
+function resolveChangelogConflict(target, worktreePath = target.worktreePath) {
   const cfg = target.knownSafeConflicts?.changelog;
   if (!cfg) return false;
-  const path = `${target.worktreePath}/${cfg.path}`;
+  const path = `${worktreePath}/${cfg.path}`;
   const text = readFileSync(path, 'utf8');
   if (!text.includes('<<<<<<<') || !text.includes('>>>>>>>')) return false;
   if (!text.includes(cfg.knownPrLineNeedle)) return false;
@@ -244,33 +246,76 @@ function resolveChangelogConflict(target) {
   });
   if (resolved.includes('<<<<<<<') || resolved.includes('>>>>>>>') || resolved.includes('=======')) return false;
   writeFileSync(path, resolved);
-  run('git', ['add', cfg.path], { cwd: target.worktreePath });
+  run('git', ['add', cfg.path], { cwd: worktreePath });
   return true;
 }
 
-function runFocusedChecks(target) {
+function runFocusedChecks(target, worktreePath = target.worktreePath) {
   for (const command of target.focusedChecks || []) {
-    console.log(`[pr-shepherd:${target.id}] check: ${command}`);
-    runShell(command, target.worktreePath);
+    console.log(`[pr-shepherd:${target.id}] check: ${redact(command)}`);
+    runShell(command, worktreePath);
   }
   for (const item of target.optionalChecks || []) {
     const command = typeof item === 'string' ? item : item.command;
     if (!command) continue;
-    console.log(`[pr-shepherd:${target.id}] optional check: ${command}`);
-    const first = runShell(command, target.worktreePath, { allowFailure: true });
+    console.log(`[pr-shepherd:${target.id}] optional check: ${redact(command)}`);
+    const first = runShell(command, worktreePath, { allowFailure: true });
     if (first.status === 0) continue;
     const missing = /Cannot find module|ERR_MODULE_NOT_FOUND|Module not found|missing dependency|pnpm install/i.test(first.output);
     if (item.retryAfterInstallOnMissingDependency && missing) {
       console.log(`[pr-shepherd:${target.id}] optional check dependency miss; pnpm install --frozen-lockfile then retry once`);
-      runShell('pnpm install --frozen-lockfile', target.worktreePath);
-      runShell(command, target.worktreePath);
+      runShell('pnpm install --frozen-lockfile', worktreePath);
+      runShell(command, worktreePath);
     } else {
-      throw new Error(`Optional check failed: ${command}\n${redact(first.output).slice(-8000)}`);
+      throw new Error(`Optional check failed: ${redact(command)}\n${redact(first.output).slice(-8000)}`);
     }
   }
 }
 
-function handleRepair(target, dryRun) {
+class RepairRefusal extends Error {}
+
+function fetchRepairRefs(target) {
+  ensureWorktree(target);
+  run('git', ['fetch', 'upstream', target.baseBranch], { cwd: target.worktreePath });
+  run('git', ['fetch', 'origin', `${target.headBranch}:${target.headBranch}`], { cwd: target.worktreePath, allowFailure: true });
+  run('git', ['fetch', 'origin', target.headBranch], { cwd: target.worktreePath });
+  return run('git', ['rev-parse', `origin/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim();
+}
+
+function conflictList(worktreePath) {
+  return runShell('git diff --name-only --diff-filter=U', worktreePath, { allowFailure: true }).stdout.trim().split('\n').filter(Boolean);
+}
+
+function rebaseAndCheck(target, worktreePath) {
+  const rebase = run('git', ['rebase', `upstream/${target.baseBranch}`], { cwd: worktreePath, allowFailure: true });
+  if (rebase.status !== 0) {
+    const conflicts = conflictList(worktreePath);
+    if (conflicts.length === 1 && conflicts[0] === target.knownSafeConflicts?.changelog?.path && resolveChangelogConflict(target, worktreePath)) {
+      run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: worktreePath });
+    } else {
+      run('git', ['rebase', '--abort'], { cwd: worktreePath, allowFailure: true });
+      return { ok: false, conflicts };
+    }
+  }
+  runFocusedChecks(target, worktreePath);
+  return { ok: true, conflicts: [] };
+}
+
+function withDryRunWorktree(target, remoteHead, fn) {
+  const parent = mkdtempSync(join(tmpdir(), 'pr-shepherd-dry-run-'));
+  const dryRunPath = join(parent, 'worktree');
+  try {
+    run('git', ['worktree', 'add', '--detach', dryRunPath, remoteHead], { cwd: target.worktreePath });
+    return fn(dryRunPath);
+  } finally {
+    run('git', ['worktree', 'remove', '--force', dryRunPath], { cwd: target.worktreePath, allowFailure: true });
+    rmSync(parent, { recursive: true, force: true });
+  }
+}
+
+function handleRepair(target, options = {}) {
+  const dryRun = Boolean(options.dryRun);
+  const approveLivePush = Boolean(options.approveLivePush);
   const unlock = acquireLock(target.lockPath, target.staleLockMs || 0);
   try {
     const { state, pr, classification } = handleCheck(target);
@@ -294,34 +339,36 @@ function handleRepair(target, dryRun) {
       return;
     }
 
-    notify(target, state, `repair-start:${repairKey}`, `${target.pr} DIRTY/CONFLICTING; starting ${dryRun ? 'dry-run ' : ''}repair`, true);
-    if (dryRun) {
+    if (!dryRun && !approveLivePush) {
+      const message = 'live repair refused: rerun with --approve-live-push only after explicit operator approval';
+      notify(target, state, `live-approval-required:${repairKey}`, `${target.pr} ${message}`, true);
       saveJson(target.statePath, state);
-      console.log(`[pr-shepherd:${target.id}] dry-run stops before git mutation`);
+      throw new RepairRefusal(message);
+    }
+
+    notify(target, state, `repair-start:${repairKey}`, `${target.pr} DIRTY/CONFLICTING; starting ${dryRun ? 'dry-run simulation' : 'operator-approved live repair'}`, true);
+    const remoteHead = fetchRepairRefs(target);
+
+    if (dryRun) {
+      const result = withDryRunWorktree(target, remoteHead, (dryRunPath) => rebaseAndCheck(target, dryRunPath));
+      if (!result.ok) {
+        state.lastRepairFailureKey = repairKey;
+        notify(target, state, `repair-conflict:${repairKey}`, `${target.pr} dry-run repair stopped: unsupported conflicts ${result.conflicts.join(', ') || '(unknown)'}`, true);
+      } else {
+        notify(target, state, `repair-dry-run-ok:${repairKey}`, `${target.pr} dry-run repair simulation passed; no push performed`, true);
+      }
+      saveJson(target.statePath, state);
       return;
     }
 
-    ensureWorktree(target);
-    run('git', ['fetch', 'upstream', target.baseBranch], { cwd: target.worktreePath });
-    run('git', ['fetch', 'origin', `${target.headBranch}:${target.headBranch}`], { cwd: target.worktreePath, allowFailure: true });
-    run('git', ['fetch', 'origin', target.headBranch], { cwd: target.worktreePath });
-    const remoteHead = run('git', ['rev-parse', `origin/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim();
     run('git', ['checkout', '-B', target.headBranch, `origin/${target.headBranch}`], { cwd: target.worktreePath });
-    const rebase = run('git', ['rebase', `upstream/${target.baseBranch}`], { cwd: target.worktreePath, allowFailure: true });
-    if (rebase.status !== 0) {
-      const conflicts = runShell('git diff --name-only --diff-filter=U', target.worktreePath, { allowFailure: true }).stdout.trim().split('\n').filter(Boolean);
-      if (conflicts.length === 1 && conflicts[0] === target.knownSafeConflicts?.changelog?.path && resolveChangelogConflict(target)) {
-        run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: target.worktreePath });
-      } else {
-        run('git', ['rebase', '--abort'], { cwd: target.worktreePath, allowFailure: true });
-        state.lastRepairFailureKey = repairKey;
-        notify(target, state, `repair-conflict:${repairKey}`, `${target.pr} repair stopped: unsupported conflicts ${conflicts.join(', ') || '(unknown)'}`, true);
-        saveJson(target.statePath, state);
-        return;
-      }
+    const result = rebaseAndCheck(target, target.worktreePath);
+    if (!result.ok) {
+      state.lastRepairFailureKey = repairKey;
+      notify(target, state, `repair-conflict:${repairKey}`, `${target.pr} repair stopped: unsupported conflicts ${result.conflicts.join(', ') || '(unknown)'}`, true);
+      saveJson(target.statePath, state);
+      return;
     }
-
-    runFocusedChecks(target);
 
     const ls = run('git', ['ls-remote', 'origin', `refs/heads/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
     if (ls !== remoteHead) throw new Error(`remote head changed; refusing push. expected ${remoteHead}, got ${ls}`);
@@ -334,7 +381,7 @@ function handleRepair(target, dryRun) {
     handleCheck(target);
   } catch (err) {
     const state = { ...defaultState(target), ...loadJson(target.statePath, {}) };
-    notify(target, state, `repair-error:${String(err.message).slice(0, 160)}`, `${target.pr} repair failed: ${redact(err.message).slice(0, 1200)}`, true);
+    if (!(err instanceof RepairRefusal)) notify(target, state, `repair-error:${String(err.message).slice(0, 160)}`, `${target.pr} repair failed: ${redact(err.message).slice(0, 1200)}`, true);
     saveJson(target.statePath, state);
     throw err;
   } finally {
@@ -347,7 +394,7 @@ export function main(argv = process.argv.slice(2)) {
   const cfg = loadConfig(args.config);
   const target = pickTarget(cfg, args.target);
   if (args.cmd === 'check') handleCheck(target);
-  else handleRepair(target, args.dryRun);
+  else handleRepair(target, { dryRun: args.dryRun, approveLivePush: args.approveLivePush });
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

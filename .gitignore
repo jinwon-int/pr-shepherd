@@ -4,3 +4,12 @@ coverage/
 .DS_Store
 state/
 *.lock
+
+# OpenClaw runtime/bootstrap context; never commit runner-private context.
+.openclaw/
+AGENTS.md
+SOUL.md
+USER.md
+TOOLS.md
+HEARTBEAT.md
+IDENTITY.md
