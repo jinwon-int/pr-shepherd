@@ -27,6 +27,32 @@ node pr-shepherd.mjs repair --config config.json --artifact-dir ./artifacts --no
   - `humanOnly`: lockfiles, broad generated/security-sensitive files, unlisted paths, or unrelated subsystems stop immediately for manual handling.
 - Merged PRs mark state as `disabled`.
 
+## Code-assisted operations and approval gates
+
+PR Shepherd is intended to assist a human operator, not to make broad autonomous code changes.
+Use `check` for read-only classification and notification, and use `repair --dry-run` to confirm a
+candidate repair path before allowing any git mutation. A live `repair` run is the approval boundary:
+start it only after the operator has confirmed the target PR, prepared worktree, remotes, and write
+permissions are correct.
+
+A live repair still fails closed unless every gate below passes:
+
+- the target is classified as `dirty`; clean, failed, pending, merged, disabled, or unknown states are not repaired
+- the 24-hour auto-push limit has not been reached, and the same head/base repair did not already fail
+- the configured worktree exists, is clean, and can fetch the expected origin/upstream refs
+- rebase conflicts are either absent or limited to the configured known-safe `CHANGELOG.md` conflict
+- all focused verification commands pass before any push is attempted
+- the remote head still matches the fetched head immediately before push
+- the push uses `--force-with-lease` against that exact expected remote head
+
+Unsupported conflicts, CI failures, stale remotes, dirty worktrees, repeated repair failures, or exhausted
+push budgets are notification-only outcomes that require human intervention.
+
+When preparing code-assisted patches for this repository, also keep OpenClaw runtime/bootstrap context
+out of branch diffs and evidence. Fail closed before PR creation if any of these repo-relative paths
+would be committed or attached: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
+`IDENTITY.md`, or `.openclaw/**`.
+
 ## Status classification
 
 - `merged`: `mergedAt` exists or state is `MERGED`; notify once and disable.
