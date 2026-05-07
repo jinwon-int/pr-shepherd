@@ -9,28 +9,76 @@ export const PR_FIELDS = [
   'headRefName', 'baseRefName', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
 ];
 
+export const OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES = [
+  'AGENTS.md',
+  'SOUL.md',
+  'USER.md',
+  'TOOLS.md',
+  'HEARTBEAT.md',
+  'IDENTITY.md',
+];
+
+export function findOpenClawRuntimeContextPaths(paths = []) {
+  const rootFiles = new Set(OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES);
+  const offending = [];
+  const seen = new Set();
+  for (const rawPath of paths) {
+    const path = String(rawPath || '').replace(/\\/g, '/').replace(/^\.\//, '');
+    if (!path || seen.has(path)) continue;
+    if (rootFiles.has(path) || path === '.openclaw' || path.startsWith('.openclaw/')) {
+      offending.push(path);
+      seen.add(path);
+    }
+  }
+  return offending.sort();
+}
+
+function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
+  const offending = findOpenClawRuntimeContextPaths(paths);
+  if (offending.length > 0) {
+    throw new Error(`OpenClaw runtime/bootstrap context paths would enter ${evidenceKind}; refusing: ${offending.join(', ')}`);
+  }
+}
+
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]`);
+  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nWhen no --target is supplied, all configured targets are processed in order.`);
   process.exit(exitCode);
+}
+
+function requireValue(flag, value) {
+  if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+  return value;
 }
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
   if (!cmd || !['check', 'repair'].includes(cmd)) usage();
-  const args = { cmd, dryRun: false, allowCodeAssistedPush: false, keepFailedRebaseWorktree: true, artifactDir: null };
+  const args = {
+    cmd,
+    dryRun: false,
+    allowCodeAssistedPush: false,
+    keepFailedRebaseWorktree: true,
+    artifactDir: null,
+    targetSelectors: [],
+    allTargets: false,
+  };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
-    if (a === '--config') args.config = rest[++i];
-    else if (a === '--target') args.target = rest[++i];
+    if (a === '--config') args.config = requireValue(a, rest[++i]);
+    else if (a === '--target') {
+      const value = requireValue(a, rest[++i]);
+      args.targetSelectors.push(...value.split(',').map((part) => part.trim()).filter(Boolean));
+    } else if (a === '--all') args.allTargets = true;
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--allow-code-assisted-push') args.allowCodeAssistedPush = true;
     else if (a === '--keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = true;
     else if (a === '--no-keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = false;
-    else if (a === '--artifact-dir') args.artifactDir = rest[++i];
+    else if (a === '--artifact-dir') args.artifactDir = requireValue(a, rest[++i]);
     else if (a === '--help' || a === '-h') usage(0);
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!args.config) usage();
+  if (args.allTargets && args.targetSelectors.length > 0) throw new Error('--all cannot be combined with --target');
   return args;
 }
 
@@ -106,16 +154,68 @@ function defaultState(target) {
   };
 }
 
+function parsePrRef(value) {
+  const match = String(value || '').match(/^([^/\s#]+)\/([^\s#]+)#(\d+)$/);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2], number: Number(match[3]), pr: `${match[1]}/${match[2]}#${match[3]}` };
+}
+
+function normalizeTarget(target, index) {
+  const parsed = parsePrRef(target.pr);
+  const owner = target.owner || parsed?.owner;
+  const repo = target.repo || parsed?.repo;
+  const number = Number(target.number || parsed?.number);
+  if (!owner || !repo || !Number.isInteger(number) || number <= 0) {
+    throw new Error(`targets[${index}] must define owner, repo, and number (or pr as owner/repo#number)`);
+  }
+  const pr = target.pr || `${owner}/${repo}#${number}`;
+  return {
+    ...target,
+    id: target.id || `${owner}-${repo}-${number}`,
+    owner,
+    repo,
+    number,
+    pr,
+    url: target.url || `https://github.com/${owner}/${repo}/pull/${number}`,
+  };
+}
+
 function loadConfig(path) {
   const cfg = loadJson(resolve(path), null);
   if (!cfg || !Array.isArray(cfg.targets) || cfg.targets.length === 0) throw new Error('config must contain targets[]');
-  return cfg;
+  const targets = cfg.targets.map(normalizeTarget);
+  const seenIds = new Set();
+  const duplicateIds = [];
+  for (const target of targets) {
+    if (seenIds.has(target.id)) duplicateIds.push(target.id);
+    seenIds.add(target.id);
+  }
+  if (duplicateIds.length > 0) throw new Error(`duplicate target id(s): ${[...new Set(duplicateIds)].join(', ')}`);
+  return { ...cfg, targets };
 }
 
-function pickTarget(cfg, id) {
-  const target = id ? cfg.targets.find((t) => t.id === id) : cfg.targets[0];
-  if (!target) throw new Error(`target not found: ${id}`);
-  return target;
+function selectorAliases(target) {
+  return new Set([
+    target.id,
+    target.pr,
+    `${target.owner}/${target.repo}#${target.number}`,
+    target.url,
+    String(target.number),
+  ].filter(Boolean).map(String));
+}
+
+export function selectTargets(cfg, selectors = [], allTargets = false) {
+  if (allTargets && selectors.length > 0) throw new Error('--all cannot be combined with --target');
+  if (allTargets || selectors.length === 0) return cfg.targets.slice();
+
+  const selected = [];
+  for (const selector of selectors) {
+    const matches = cfg.targets.filter((target) => selectorAliases(target).has(String(selector)));
+    if (matches.length === 0) throw new Error(`target not found: ${selector}`);
+    if (matches.length > 1) throw new Error(`ambiguous target selector ${selector}; use target id or owner/repo#number`);
+    if (!selected.some((target) => target.id === matches[0].id)) selected.push(matches[0]);
+  }
+  return selected;
 }
 
 function ghPrView(target) {
@@ -329,6 +429,7 @@ export function buildConflictArtifactPayload(target, pr, conflictInfo, conflicts
 }
 
 function writeConflictArtifact(target, pr, conflictInfo, conflicts, repairKey, artifactDirOverride) {
+  assertNoOpenClawRuntimeContextPaths(conflicts, 'artifact evidence');
   const artifactDir = resolve(artifactDirOverride || target.artifactDir || `${dirname(target.statePath)}/artifacts`);
   mkdirSync(artifactDir, { recursive: true });
   const safeId = String(target.id || 'target').replace(/[^A-Za-z0-9_.-]+/g, '-');
@@ -400,6 +501,14 @@ function runFocusedChecks(target) {
   }
 }
 
+function assertNoOpenClawRuntimeContextInBranch(target, baseRef) {
+  const changedPaths = run('git', ['diff', '--name-only', `${baseRef}...HEAD`], { cwd: target.worktreePath }).stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean);
+  assertNoOpenClawRuntimeContextPaths(changedPaths, 'branch diff');
+}
+
 function handleRepair(target, dryRun, opts = {}) {
   const unlock = acquireLock(target.lockPath, target.staleLockMs || 0);
   try {
@@ -449,8 +558,19 @@ function handleRepair(target, dryRun, opts = {}) {
     const rebase = run('git', ['rebase', `upstream/${target.baseBranch}`], { cwd: target.worktreePath, allowFailure: true });
     if (rebase.status !== 0) {
       const conflicts = runShell('git diff --name-only --diff-filter=U', target.worktreePath, { allowFailure: true }).stdout.trim().split('\n').filter(Boolean);
+      const contextConflicts = findOpenClawRuntimeContextPaths(conflicts);
       const conflictInfo = classifyConflictSet(conflicts, target);
       const conflictKey = conflictSetKey(pr, baseOid, conflicts);
+      if (contextConflicts.length > 0) {
+        run('git', ['rebase', '--abort'], { cwd: target.worktreePath, allowFailure: true });
+        state.lastRepairFailureKey = repairKey;
+        state.lastConflictSetKey = conflictKey;
+        state.lastConflictTier = 'runtimeContext';
+        state.lastConflictPaths = contextConflicts;
+        notify(target, state, `runtime-context-conflict:${conflictKey}`, `${target.pr} repair stopped: OpenClaw runtime/bootstrap context paths would enter artifact evidence; refusing: ${contextConflicts.join(', ')}`, true);
+        saveJson(target.statePath, state);
+        return;
+      }
       const canResolveAutomatically = conflictInfo.tier === 'autoSafe' && resolveAutoSafeConflicts(target, conflictInfo);
       if (canResolveAutomatically) {
         run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: target.worktreePath });
@@ -474,6 +594,7 @@ function handleRepair(target, dryRun, opts = {}) {
     }
 
     runFocusedChecks(target);
+    assertNoOpenClawRuntimeContextInBranch(target, `upstream/${target.baseBranch}`);
 
     const ls = run('git', ['ls-remote', 'origin', `refs/heads/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
     if (ls !== remoteHead) throw new Error(`remote head changed; refusing push. expected ${remoteHead}, got ${ls}`);
@@ -495,12 +616,33 @@ function handleRepair(target, dryRun, opts = {}) {
   }
 }
 
+function handleTargetCommand(target, args) {
+  if (args.cmd === 'check') return handleCheck(target);
+  return handleRepair(target, args.dryRun, args);
+}
+
+export function orchestrateTargets(targets, args) {
+  const results = [];
+  for (const target of targets) {
+    try {
+      handleTargetCommand(target, args);
+      results.push({ target: target.id, ok: true });
+    } catch (err) {
+      results.push({ target: target.id, ok: false, error: redact(err.message) });
+      console.error(`[pr-shepherd:${target.id}] ${redact(err.message).slice(0, 8000)}`);
+    }
+  }
+  if (targets.length > 1) console.log(JSON.stringify({ command: args.cmd, targets: results }, null, 2));
+  const failures = results.filter((result) => !result.ok);
+  if (failures.length > 0) throw new Error(`${failures.length}/${results.length} target(s) failed`);
+  return results;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const cfg = loadConfig(args.config);
-  const target = pickTarget(cfg, args.target);
-  if (args.cmd === 'check') handleCheck(target);
-  else handleRepair(target, args.dryRun, args);
+  const targets = selectTargets(cfg, args.targetSelectors, args.allTargets);
+  orchestrateTargets(targets, args);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

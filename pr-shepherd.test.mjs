@@ -10,8 +10,10 @@ import {
   classifyConflictSet,
   classifyPr,
   conflictSetKey,
+  findOpenClawRuntimeContextPaths,
   notificationKey,
   resolveChangelogConflict,
+  selectTargets,
 } from './pr-shepherd.mjs';
 
 const base = {
@@ -23,6 +25,28 @@ const base = {
   mergeStateStatus: 'CLEAN',
   statusCheckRollup: [],
 };
+
+test('selectTargets orchestrates all configured targets by default', () => {
+  const cfg = {
+    targets: [
+      { id: 'repo-a-1', owner: 'owner-a', repo: 'repo-a', number: 1, pr: 'owner-a/repo-a#1', url: 'https://github.com/owner-a/repo-a/pull/1' },
+      { id: 'repo-b-1', owner: 'owner-b', repo: 'repo-b', number: 1, pr: 'owner-b/repo-b#1', url: 'https://github.com/owner-b/repo-b/pull/1' },
+    ],
+  };
+  assert.deepEqual(selectTargets(cfg).map((target) => target.id), ['repo-a-1', 'repo-b-1']);
+  assert.deepEqual(selectTargets(cfg, ['owner-b/repo-b#1']).map((target) => target.id), ['repo-b-1']);
+  assert.throws(() => selectTargets(cfg, ['1']), /ambiguous target selector/);
+});
+
+test('findOpenClawRuntimeContextPaths reports only root runtime context paths', () => {
+  assert.deepEqual(findOpenClawRuntimeContextPaths([
+    './AGENTS.md',
+    '.openclaw/workspace-state.json',
+    'docs/AGENTS.md',
+    'src/HEARTBEAT.md',
+    'TOOLS.md',
+  ]), ['.openclaw/workspace-state.json', 'AGENTS.md', 'TOOLS.md']);
+});
 
 test('classifies clean PR', () => {
   assert.equal(classifyPr(base).kind, 'clean');
