@@ -73,17 +73,17 @@ artifact evidence or pushing a repaired branch.
 
 ## Worktree requirement
 
-`config.json` currently points to:
+`config.json` should point each live repair target at a dedicated prepared worktree, for example:
 
 ```text
-/root/.openclaw/workspace/openclaw-pr-78261
+<worktree-root>/openclaw-pr-78261
 ```
 
 Before live repair, prepare the worktree with remotes:
 
 ```bash
-git clone git@github.com:jinon86/openclaw.git /root/.openclaw/workspace/openclaw-pr-78261
-cd /root/.openclaw/workspace/openclaw-pr-78261
+git clone git@github.com:jinon86/openclaw.git <worktree-root>/openclaw-pr-78261
+cd <worktree-root>/openclaw-pr-78261
 git remote add upstream https://github.com/openclaw/openclaw.git || true
 git fetch origin fix/telegram-outbound-visible-receipts
 git fetch upstream main
@@ -160,6 +160,31 @@ Keep live repair units disabled by default. When a repair is approved, prefer a 
 `--target <id>` so the operator approval, logs, state update, and force-with-lease guard are scoped to
 one PR.
 
+## Check-only deployment
+
+Deploy routine automation with the read-only `check` command. A check run queries GitHub PR state,
+updates the target state file, and emits deduplicated notifications; it does not touch the watched
+worktree, rebase, write conflict artifacts, or push branches.
+
+Recommended check-only pattern:
+
+```bash
+node pr-shepherd.mjs check --config config.json --target openclaw-78261
+# or, for an aggregate monitor:
+node pr-shepherd.mjs check --config config.json --all
+```
+
+Operational notes:
+
+- Use a GitHub CLI token with read access for check-only timers; reserve write/push credentials for
+  explicitly approved repair commands.
+- Ensure each target has a writable, unique `statePath` so notification dedupe and pending-check age
+  tracking survive between timer runs.
+- Send stdout/stderr to journald, OpenClaw cron, or another operator log. The JSON summary line is
+  intended for machine-readable run evidence.
+- Do not schedule `repair` from the same timer. Keep repair as a manual one-shot approval boundary,
+  starting with `repair --dry-run` when investigation is needed.
+
 ## Focused verification
 
 After successful rebase the CLI runs:
@@ -182,17 +207,32 @@ If optional type checks fail due missing/stale dependencies, the CLI runs `pnpm 
 ## Notification integration
 
 MVP default is `notify.mode=stdout` so OpenClaw cron/systemd can capture output and route summaries.
+Set `notify.mode=none` to keep only the final JSON status output.
 
-For later integration, set:
+For notifier hooks, set `notify.mode=command` and provide an argv array:
 
 ```json
 "notify": {
   "mode": "command",
-  "command": ["/path/to/notifier"]
+  "command": ["/usr/local/bin/pr-shepherd-notify", "--channel", "ops"]
 }
 ```
 
-The message is passed as `PR_SHEPHERD_MESSAGE`. The notifier must not print secrets.
+The formatted notification line is passed in the `PR_SHEPHERD_MESSAGE` environment variable. The
+notifier hook receives no stdin from PR Shepherd, and its configured argv is executed directly without
+a shell. Hook failures are allowed so a flaky notifier cannot block state updates; use the process logs
+or your notifier's own telemetry to alert on delivery problems.
+
+Notifier hook requirements:
+
+- Treat hooks as notification-only; they must not run `repair`, mutate branches, or push code.
+- Keep output concise and free of secrets, private worktree paths, and OpenClaw runtime/bootstrap
+  context such as `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
+  `.openclaw/**`.
+- Make delivery idempotent. PR Shepherd deduplicates by notification key in the target state file, but
+  operators may still replay timers or rerun checks manually.
+- Prefer a small wrapper script when routing to chat/email/webhooks so credentials stay outside
+  `config.json` and can be managed by the host service environment.
 
 ## Suggested timer
 

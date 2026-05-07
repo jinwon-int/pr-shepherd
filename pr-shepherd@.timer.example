@@ -1,5 +1,5 @@
 [Unit]
-Description=Run OpenClaw PR Shepherd (%i) every 10 minutes
+Description=Run OpenClaw PR Shepherd check-only monitor (%i) every 10 minutes
 
 [Timer]
 OnBootSec=3min

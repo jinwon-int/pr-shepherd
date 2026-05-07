@@ -1,14 +1,14 @@
 [Unit]
-Description=OpenClaw PR Shepherd (%i)
+Description=OpenClaw PR Shepherd check-only monitor (%i)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/.openclaw/workspace/tools/pr-shepherd
-ExecStart=/usr/bin/node /root/.openclaw/workspace/tools/pr-shepherd/pr-shepherd.mjs check --config /root/.openclaw/workspace/tools/pr-shepherd/config.json --target %i
-# Use repair only after explicit operator approval and worktree preparation:
-# ExecStart=/usr/bin/node /root/.openclaw/workspace/tools/pr-shepherd/pr-shepherd.mjs repair --config /root/.openclaw/workspace/tools/pr-shepherd/config.json --target %i
+WorkingDirectory=<pr-shepherd-repo>
+ExecStart=/usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs check --config <pr-shepherd-repo>/config.json --target %i
+# Keep repair out of timers. Run repair manually only after explicit operator approval:
+# /usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs repair --config <pr-shepherd-repo>/config.json --target %i --dry-run
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
