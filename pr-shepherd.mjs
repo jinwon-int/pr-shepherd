@@ -41,7 +41,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nWhen no --target is supplied, all configured targets are processed in order.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target.`);
   process.exit(exitCode);
 }
 
@@ -206,7 +206,8 @@ function selectorAliases(target) {
 
 export function selectTargets(cfg, selectors = [], allTargets = false) {
   if (allTargets && selectors.length > 0) throw new Error('--all cannot be combined with --target');
-  if (allTargets || selectors.length === 0) return cfg.targets.slice();
+  if (allTargets) return cfg.targets.slice();
+  if (selectors.length === 0) return cfg.targets.slice(0, 1);
 
   const selected = [];
   for (const selector of selectors) {
@@ -641,6 +642,9 @@ export function orchestrateTargets(targets, args) {
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const cfg = loadConfig(args.config);
+  if (!args.allTargets && args.targetSelectors.length === 0 && cfg.targets.length > 1) {
+    console.error('Warning: no --target or --all supplied; processing first configured target for backward compatibility. Use --all to process every target.');
+  }
   const targets = selectTargets(cfg, args.targetSelectors, args.allTargets);
   orchestrateTargets(targets, args);
 }

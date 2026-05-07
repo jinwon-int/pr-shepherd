@@ -26,16 +26,18 @@ const base = {
   statusCheckRollup: [],
 };
 
-test('selectTargets orchestrates all configured targets by default', () => {
+test('selectTargets preserves first-target default and supports explicit all-target orchestration', () => {
   const cfg = {
     targets: [
       { id: 'repo-a-1', owner: 'owner-a', repo: 'repo-a', number: 1, pr: 'owner-a/repo-a#1', url: 'https://github.com/owner-a/repo-a/pull/1' },
       { id: 'repo-b-1', owner: 'owner-b', repo: 'repo-b', number: 1, pr: 'owner-b/repo-b#1', url: 'https://github.com/owner-b/repo-b/pull/1' },
     ],
   };
-  assert.deepEqual(selectTargets(cfg).map((target) => target.id), ['repo-a-1', 'repo-b-1']);
+  assert.deepEqual(selectTargets(cfg).map((target) => target.id), ['repo-a-1']);
+  assert.deepEqual(selectTargets(cfg, [], true).map((target) => target.id), ['repo-a-1', 'repo-b-1']);
   assert.deepEqual(selectTargets(cfg, ['owner-b/repo-b#1']).map((target) => target.id), ['repo-b-1']);
   assert.throws(() => selectTargets(cfg, ['1']), /ambiguous target selector/);
+  assert.throws(() => selectTargets(cfg, ['repo-a-1'], true), /--all cannot be combined with --target/);
 });
 
 test('findOpenClawRuntimeContextPaths reports only root runtime context paths', () => {
