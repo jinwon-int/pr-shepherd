@@ -1,28 +1,32 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, openSync, closeSync, unlinkSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const PR_FIELDS = [
   'number', 'state', 'mergeable', 'mergeStateStatus', 'mergedAt', 'headRefOid',
-  'headRefName', 'baseRefName', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
+  'headRefName', 'baseRefName', 'baseRefOid', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
 ];
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run]`);
+  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id]\n  node pr-shepherd.mjs repair --config config.json [--target id] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]`);
   process.exit(exitCode);
 }
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
   if (!cmd || !['check', 'repair'].includes(cmd)) usage();
-  const args = { cmd, dryRun: false };
+  const args = { cmd, dryRun: false, allowCodeAssistedPush: false, keepFailedRebaseWorktree: true, artifactDir: null };
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i];
     if (a === '--config') args.config = rest[++i];
     else if (a === '--target') args.target = rest[++i];
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--allow-code-assisted-push') args.allowCodeAssistedPush = true;
+    else if (a === '--keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = true;
+    else if (a === '--no-keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = false;
+    else if (a === '--artifact-dir') args.artifactDir = rest[++i];
     else if (a === '--help' || a === '-h') usage(0);
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -169,6 +173,7 @@ function notify(target, state, key, message, force = false) {
 function updateStateFromPr(state, pr, classification) {
   state.lastRunAt = new Date().toISOString();
   state.lastSeenHeadOid = pr.headRefOid || state.lastSeenHeadOid;
+  state.lastSeenBaseOid = pr.baseRefOid || state.lastSeenBaseOid;
   state.lastMergeable = pr.mergeable || null;
   state.lastMergeStateStatus = pr.mergeStateStatus || null;
   state.lastFailureNames = classification.checks.failed.map((c) => c.name);
@@ -224,13 +229,127 @@ function recentAutoPushes(state, now = Date.now()) {
   return (state.autoPushes || []).filter((p) => now - Date.parse(p.at) < 24 * 60 * 60 * 1000);
 }
 
-function resolveChangelogConflict(target) {
-  const cfg = target.knownSafeConflicts?.changelog;
-  if (!cfg) return false;
+const DEFAULT_HUMAN_ONLY_CONFLICTS = [
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+];
+
+function normalizePolicyEntry(entry) {
+  if (typeof entry === 'string') return { path: entry };
+  if (entry && typeof entry === 'object' && entry.path) return { ...entry };
+  return null;
+}
+
+function matchesPolicyPath(entry, conflictPath) {
+  if (!entry?.path) return false;
+  if (entry.path.endsWith('/**')) return conflictPath === entry.path.slice(0, -3) || conflictPath.startsWith(entry.path.slice(0, -2));
+  return conflictPath === entry.path;
+}
+
+function normalizeConflictPolicy(target = {}) {
+  const raw = target.conflictPolicy || {};
+  const legacyChangelog = target.knownSafeConflicts?.changelog
+    ? [{
+        path: target.knownSafeConflicts.changelog.path,
+        resolver: 'merge-changelog-top-entry',
+        needle: target.knownSafeConflicts.changelog.knownPrLineNeedle,
+      }]
+    : [];
+  const autoSafe = [...legacyChangelog, ...(raw.autoSafe || [])].map(normalizePolicyEntry).filter(Boolean);
+  const codeAssisted = (raw.codeAssisted || []).map(normalizePolicyEntry).filter(Boolean);
+  const humanOnly = (raw.humanOnly || []).map(normalizePolicyEntry).filter(Boolean);
+  for (const path of DEFAULT_HUMAN_ONLY_CONFLICTS) {
+    const alreadyConfigured = [...autoSafe, ...codeAssisted, ...humanOnly].some((entry) => matchesPolicyPath(entry, path));
+    if (!alreadyConfigured) humanOnly.push({ path, default: true });
+  }
+  return { autoSafe, codeAssisted, humanOnly };
+}
+
+export function classifyConflictPath(conflictPath, target = {}) {
+  const policy = normalizeConflictPolicy(target);
+  const explicitHumanOnly = policy.humanOnly.find((entry) => !entry.default && matchesPolicyPath(entry, conflictPath));
+  if (explicitHumanOnly) return { path: conflictPath, tier: 'humanOnly', policy: explicitHumanOnly, reason: 'humanOnly' };
+  const autoSafe = policy.autoSafe.find((entry) => matchesPolicyPath(entry, conflictPath));
+  if (autoSafe) return { path: conflictPath, tier: 'autoSafe', policy: autoSafe, reason: 'autoSafe' };
+  const codeAssisted = policy.codeAssisted.find((entry) => matchesPolicyPath(entry, conflictPath));
+  if (codeAssisted) return { path: conflictPath, tier: 'codeAssisted', policy: codeAssisted, reason: 'codeAssisted' };
+  const defaultHumanOnly = policy.humanOnly.find((entry) => matchesPolicyPath(entry, conflictPath));
+  if (defaultHumanOnly) return { path: conflictPath, tier: 'humanOnly', policy: defaultHumanOnly, reason: 'defaultHumanOnly' };
+  return { path: conflictPath, tier: 'humanOnly', policy: null, reason: 'unlisted' };
+}
+
+export function classifyConflictSet(conflicts = [], target = {}) {
+  const paths = [...new Set(conflicts)].filter(Boolean).sort();
+  const entries = paths.map((path) => classifyConflictPath(path, target));
+  let tier = 'none';
+  if (entries.some((entry) => entry.tier === 'humanOnly')) tier = 'humanOnly';
+  else if (entries.length > 0 && entries.every((entry) => entry.tier === 'autoSafe')) tier = 'autoSafe';
+  else if (entries.some((entry) => entry.tier === 'codeAssisted')) tier = 'codeAssisted';
+  return {
+    tier,
+    entries,
+    autoPushAllowed: tier === 'autoSafe',
+    pushBlocked: tier !== 'autoSafe',
+    requiresApproval: tier === 'codeAssisted',
+  };
+}
+
+export function conflictSetKey(pr, baseOid, conflicts = []) {
+  const head = pr?.headRefOid || 'unknown-head';
+  const base = baseOid || pr?.baseRefOid || pr?.baseRefName || 'unknown-base';
+  const paths = [...new Set(conflicts)].filter(Boolean).sort().join('|');
+  return `conflict:${head}:${base}:${paths}`;
+}
+
+function repairAttemptKey(pr, baseOid) {
+  return `repair:${pr.headRefOid || ''}:${baseOid || pr.baseRefOid || pr.baseRefName || ''}:${pr.mergeable || ''}:${pr.mergeStateStatus || ''}`;
+}
+
+export function buildConflictArtifactPayload(target, pr, conflictInfo, conflicts, repairKey) {
+  return {
+    schema: 'pr-shepherd-conflict-artifact/v1',
+    target: target.id,
+    pr: target.pr,
+    url: target.url || pr?.url || null,
+    headRefOid: pr?.headRefOid || null,
+    baseRefName: target.baseBranch || pr?.baseRefName || null,
+    tier: conflictInfo.tier,
+    autoPushAllowed: conflictInfo.autoPushAllowed,
+    pushBlocked: conflictInfo.pushBlocked,
+    requiresApproval: conflictInfo.requiresApproval,
+    conflicts: conflicts.slice().sort(),
+    classifications: conflictInfo.entries.map((entry) => ({ path: entry.path, tier: entry.tier, reason: entry.reason })),
+    repairKey,
+    createdAt: new Date().toISOString(),
+    note: conflictInfo.tier === 'codeAssisted'
+      ? 'Code-assisted conflict: manual resolver/approval required before any push.'
+      : 'Conflict escalated; no automatic push was attempted.',
+  };
+}
+
+function writeConflictArtifact(target, pr, conflictInfo, conflicts, repairKey, artifactDirOverride) {
+  const artifactDir = resolve(artifactDirOverride || target.artifactDir || `${dirname(target.statePath)}/artifacts`);
+  mkdirSync(artifactDir, { recursive: true });
+  const safeId = String(target.id || 'target').replace(/[^A-Za-z0-9_.-]+/g, '-');
+  const artifactPath = `${artifactDir}/${safeId}-${conflictInfo.tier}-conflict.json`;
+  saveJson(artifactPath, buildConflictArtifactPayload(target, pr, conflictInfo, conflicts, repairKey));
+  return artifactPath;
+}
+
+export function resolveChangelogConflict(target, policyEntry = null) {
+  const legacy = target.knownSafeConflicts?.changelog;
+  const cfg = policyEntry || (legacy && {
+    path: legacy.path,
+    resolver: 'merge-changelog-top-entry',
+    needle: legacy.knownPrLineNeedle,
+  });
+  if (!cfg || cfg.resolver !== 'merge-changelog-top-entry') return false;
   const path = `${target.worktreePath}/${cfg.path}`;
   const text = readFileSync(path, 'utf8');
   if (!text.includes('<<<<<<<') || !text.includes('>>>>>>>')) return false;
-  if (!text.includes(cfg.knownPrLineNeedle)) return false;
+  if (cfg.needle && !text.includes(cfg.needle)) return false;
   const resolved = text.replace(/<<<<<<<[^\n]*\n([\s\S]*?)=======\n([\s\S]*?)>>>>>>>[^\n]*(?:\n|$)/g, (_m, ours, theirs) => {
     const lines = [];
     const seen = new Set();
@@ -245,6 +364,18 @@ function resolveChangelogConflict(target) {
   if (resolved.includes('<<<<<<<') || resolved.includes('>>>>>>>') || resolved.includes('=======')) return false;
   writeFileSync(path, resolved);
   run('git', ['add', cfg.path], { cwd: target.worktreePath });
+  return true;
+}
+
+function resolveAutoSafeConflicts(target, conflictInfo) {
+  for (const entry of conflictInfo.entries) {
+    if (entry.tier !== 'autoSafe') return false;
+    if (entry.policy?.resolver === 'merge-changelog-top-entry') {
+      if (!resolveChangelogConflict(target, entry.policy)) return false;
+    } else {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -270,13 +401,20 @@ function runFocusedChecks(target) {
   }
 }
 
-function handleRepair(target, dryRun) {
+function handleRepair(target, dryRun, opts = {}) {
   const unlock = acquireLock(target.lockPath, target.staleLockMs || 0);
   try {
     const { state, pr, classification } = handleCheck(target);
     if (state.disabled) return;
     if (classification.kind !== 'dirty') {
       console.log(`[pr-shepherd:${target.id}] no repair needed for ${classification.kind}`);
+      return;
+    }
+
+    const preRepairKey = repairAttemptKey(pr, state.lastSeenBaseOid);
+    if (state.lastRepairFailureKey === preRepairKey) {
+      notify(target, state, `repeat-failure:${preRepairKey}`, `${target.pr} repair already failed for this head/base state; human intervention needed`, true);
+      saveJson(target.statePath, state);
       return;
     }
 
@@ -287,14 +425,7 @@ function handleRepair(target, dryRun) {
       return;
     }
 
-    const repairKey = `${pr.headRefOid}:${pr.mergeStateStatus}:${pr.mergeable}`;
-    if (state.lastRepairFailureKey === repairKey) {
-      notify(target, state, `repeat-failure:${repairKey}`, `${target.pr} repair already failed for this head/base state; human intervention needed`, true);
-      saveJson(target.statePath, state);
-      return;
-    }
-
-    notify(target, state, `repair-start:${repairKey}`, `${target.pr} DIRTY/CONFLICTING; starting ${dryRun ? 'dry-run ' : ''}repair`, true);
+    notify(target, state, `repair-start:${preRepairKey}`, `${target.pr} DIRTY/CONFLICTING; starting ${dryRun ? 'dry-run ' : ''}repair`, true);
     if (dryRun) {
       saveJson(target.statePath, state);
       console.log(`[pr-shepherd:${target.id}] dry-run stops before git mutation`);
@@ -303,6 +434,15 @@ function handleRepair(target, dryRun) {
 
     ensureWorktree(target);
     run('git', ['fetch', 'upstream', target.baseBranch], { cwd: target.worktreePath });
+    const baseOid = run('git', ['rev-parse', `upstream/${target.baseBranch}`], { cwd: target.worktreePath }).stdout.trim();
+    state.lastSeenBaseOid = baseOid;
+    const repairKey = repairAttemptKey(pr, baseOid);
+    if (state.lastRepairFailureKey === repairKey) {
+      notify(target, state, `repeat-failure:${repairKey}`, `${target.pr} repair already failed for this head/base state; human intervention needed`, true);
+      saveJson(target.statePath, state);
+      return;
+    }
+
     run('git', ['fetch', 'origin', `${target.headBranch}:${target.headBranch}`], { cwd: target.worktreePath, allowFailure: true });
     run('git', ['fetch', 'origin', target.headBranch], { cwd: target.worktreePath });
     const remoteHead = run('git', ['rev-parse', `origin/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim();
@@ -310,12 +450,25 @@ function handleRepair(target, dryRun) {
     const rebase = run('git', ['rebase', `upstream/${target.baseBranch}`], { cwd: target.worktreePath, allowFailure: true });
     if (rebase.status !== 0) {
       const conflicts = runShell('git diff --name-only --diff-filter=U', target.worktreePath, { allowFailure: true }).stdout.trim().split('\n').filter(Boolean);
-      if (conflicts.length === 1 && conflicts[0] === target.knownSafeConflicts?.changelog?.path && resolveChangelogConflict(target)) {
+      const conflictInfo = classifyConflictSet(conflicts, target);
+      const conflictKey = conflictSetKey(pr, baseOid, conflicts);
+      const canResolveAutomatically = conflictInfo.tier === 'autoSafe' && resolveAutoSafeConflicts(target, conflictInfo);
+      if (canResolveAutomatically) {
         run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: target.worktreePath });
       } else {
-        run('git', ['rebase', '--abort'], { cwd: target.worktreePath, allowFailure: true });
+        const artifactPath = writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir);
+        const keepWorktree = conflictInfo.tier === 'codeAssisted'
+          && target.keepFailedRebaseWorktree !== false
+          && opts.keepFailedRebaseWorktree !== false;
+        if (!keepWorktree) run('git', ['rebase', '--abort'], { cwd: target.worktreePath, allowFailure: true });
         state.lastRepairFailureKey = repairKey;
-        notify(target, state, `repair-conflict:${repairKey}`, `${target.pr} repair stopped: unsupported conflicts ${conflicts.join(', ') || '(unknown)'}`, true);
+        state.lastConflictSetKey = conflictKey;
+        state.lastConflictTier = conflictInfo.tier;
+        state.lastConflictPaths = conflicts.slice().sort();
+        const pushNote = conflictInfo.tier === 'codeAssisted' && !opts.allowCodeAssistedPush
+          ? '; push blocked pending explicit code-assisted approval'
+          : '; no automatic resolver available, push not attempted';
+        notify(target, state, `repair-conflict:${conflictKey}`, `${target.pr} repair stopped: ${conflictInfo.tier} conflicts ${conflicts.join(', ') || '(unknown)'}${pushNote}; artifact ${basename(artifactPath)}`, true);
         saveJson(target.statePath, state);
         return;
       }
@@ -329,6 +482,7 @@ function handleRepair(target, dryRun) {
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
     state.autoPushes = [...pushes24h, { at: new Date().toISOString(), from: remoteHead, to: newHead, reason: 'dirty-rebase' }];
     delete state.lastRepairFailureKey;
+    delete state.lastConflictSetKey;
     notify(target, state, `repair-success:${remoteHead}:${newHead}`, `${target.pr} repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`, true);
     saveJson(target.statePath, state);
     handleCheck(target);
@@ -347,7 +501,7 @@ export function main(argv = process.argv.slice(2)) {
   const cfg = loadConfig(args.config);
   const target = pickTarget(cfg, args.target);
   if (args.cmd === 'check') handleCheck(target);
-  else handleRepair(target, args.dryRun);
+  else handleRepair(target, args.dryRun, args);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

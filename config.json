@@ -21,11 +21,27 @@
         "origin": "git@github.com:jinon86/openclaw.git",
         "upstream": "https://github.com/openclaw/openclaw.git"
       },
-      "knownSafeConflicts": {
-        "changelog": {
-          "path": "CHANGELOG.md",
-          "knownPrLineNeedle": "Telegram/Plugin SDK: expose delivery.providerAccepted"
-        }
+      "conflictPolicy": {
+        "autoSafe": [
+          {
+            "path": "CHANGELOG.md",
+            "resolver": "merge-changelog-top-entry",
+            "needle": "Telegram/Plugin SDK: expose delivery.providerAccepted"
+          }
+        ],
+        "codeAssisted": [
+          "extensions/telegram/src/outbound-adapter.ts",
+          "extensions/telegram/src/send.ts",
+          "extensions/telegram/src/outbound-adapter.test.ts",
+          "extensions/telegram/src/telegram-outbound.test.ts",
+          "src/channels/message/outbound-bridge.test.ts",
+          "src/channels/plugins/outbound.types.ts",
+          "src/infra/outbound/deliver-types.ts"
+        ],
+        "humanOnly": [
+          "pnpm-lock.yaml",
+          "package-lock.json"
+        ]
       },
       "focusedChecks": [
         "pnpm test extensions/telegram/src/channel.message-adapter.test.ts extensions/telegram/src/outbound-adapter.test.ts extensions/telegram/src/telegram-outbound.test.ts src/channels/message/outbound-bridge.test.ts",
