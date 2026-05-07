@@ -41,7 +41,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/repair.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/repair.`);
   process.exit(exitCode);
 }
 
@@ -52,7 +52,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'check', 'repair'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'repair'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -460,18 +460,49 @@ export function notificationKey(kind, pr, checks, extra = '') {
   return `${kind}:${pr.headRefOid || ''}:${pr.mergeable || ''}:${pr.mergeStateStatus || ''}:${extra}`;
 }
 
-function notify(target, state, key, message, force = false) {
-  if (!force && state.lastNotificationKey === key) return false;
-  state.lastNotificationKey = key;
-  const line = `[pr-shepherd:${target.id}] ${message}`;
+function deliverNotification(target, line, meta = {}) {
   if (target.notify?.mode === 'none') return true;
   if (target.notify?.mode === 'command' && Array.isArray(target.notify.command)) {
     const [cmd, ...args] = target.notify.command;
-    run(cmd, args, { env: { PR_SHEPHERD_MESSAGE: line }, allowFailure: true });
+    run(cmd, args, {
+      env: {
+        PR_SHEPHERD_MESSAGE: line,
+        PR_SHEPHERD_TARGET: String(target.id || ''),
+        PR_SHEPHERD_PR: String(target.pr || ''),
+        PR_SHEPHERD_URL: String(target.url || ''),
+        PR_SHEPHERD_KIND: String(meta.kind || ''),
+        PR_SHEPHERD_KEY: String(meta.key || ''),
+      },
+      allowFailure: true,
+    });
   } else {
     console.log(line);
   }
   return true;
+}
+
+function notify(target, state, key, message, force = false) {
+  if (!force && state.lastNotificationKey === key) return false;
+  state.lastNotificationKey = key;
+  const line = `[pr-shepherd:${target.id}] ${message}`;
+  return deliverNotification(target, line, { kind: 'notification', key });
+}
+
+export function buildCanaryNotificationLine(target, now = new Date()) {
+  const at = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+  return `[pr-shepherd:${target.id}] ${target.pr} notifier canary at ${at}; no PR state changed`;
+}
+
+function handleCanary(target) {
+  const line = buildCanaryNotificationLine(target);
+  deliverNotification(target, line, { kind: 'canary', key: `canary:${target.id}` });
+  console.log(JSON.stringify({
+    target: target.id,
+    pr: target.pr,
+    kind: 'canary',
+    notifyMode: target.notify?.mode || 'stdout',
+    delivered: target.notify?.mode !== 'none',
+  }, null, 2));
 }
 
 function updateStateFromPr(state, pr, classification) {
@@ -860,6 +891,10 @@ export function main(argv = process.argv.slice(2)) {
     const rows = buildStatusRows(targets);
     console.log(JSON.stringify(targets.length === 1 ? rows[0] : { command: 'status', targets: rows }, null, 2));
     return rows;
+  }
+  if (args.cmd === 'canary') {
+    for (const target of targets) handleCanary(target);
+    return targets;
   }
   orchestrateTargets(targets, args);
 }
