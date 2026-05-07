@@ -21,9 +21,10 @@ or all-target.
 
 ## Safety defaults
 
-- State file: `/root/.openclaw/state/pr-shepherd/78261.json`
-- Lock file: `/tmp/pr-shepherd-78261.lock`
-- Duplicate runs are blocked by an exclusive lock.
+- For backward compatibility, omitting both `--target` and `--all` runs only the first configured target and emits a warning when multiple targets exist.
+- Use `--target <id>` or `--target owner/repo#number` to narrow a run; use `--all` to process every configured target serially.
+- Each target keeps its own state file and lock file, so one repo/PR cannot share repair state with another.
+- Duplicate runs for the same target are blocked by that target's exclusive lock.
 - Auto pushes are limited to 5 per rolling 24h.
 - Push uses only `git push --force-with-lease=<branch>:<expected-remote-head>`.
 - The CLI refuses to push if the remote head changed after fetch.
@@ -59,7 +60,8 @@ push budgets are notification-only outcomes that require human intervention.
 When preparing code-assisted patches for this repository, also keep OpenClaw runtime/bootstrap context
 out of branch diffs and evidence. Fail closed before PR creation if any of these repo-relative paths
 would be committed or attached: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
-`IDENTITY.md`, or `.openclaw/**`.
+`IDENTITY.md`, or `.openclaw/**`. PR Shepherd applies the same guard before writing conflict
+artifact evidence or pushing a repaired branch.
 
 ## Status classification
 
@@ -87,7 +89,8 @@ git fetch origin fix/telegram-outbound-visible-receipts
 git fetch upstream main
 ```
 
-The CLI requires a clean worktree before mutation.
+The CLI requires a clean worktree before mutation. For multiple targets, configure separate
+`worktreePath`, `statePath`, and `lockPath` values per PR.
 
 ## Multi-target operations
 
