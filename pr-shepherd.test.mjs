@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -153,6 +153,55 @@ test('status command reads state files without network access', () => {
     assert.equal(status.lastKind, 'failed');
     assert.deepEqual(status.lastFailureNames, ['lint']);
     assert.equal(status.recentAutoPushCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('canary command exercises command notifier hook without GitHub or state mutation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-canary-'));
+  try {
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const hookPath = join(dir, 'hook.mjs');
+    const hookOutPath = join(dir, 'hook-output.json');
+    writeFileSync(hookPath, [
+      "import { writeFileSync } from 'node:fs';",
+      "writeFileSync(process.argv[2], JSON.stringify({",
+      '  message: process.env.PR_SHEPHERD_MESSAGE,',
+      '  target: process.env.PR_SHEPHERD_TARGET,',
+      '  pr: process.env.PR_SHEPHERD_PR,',
+      '  url: process.env.PR_SHEPHERD_URL,',
+      '  kind: process.env.PR_SHEPHERD_KIND,',
+      '  key: process.env.PR_SHEPHERD_KEY,',
+      '}));',
+      '',
+    ].join('\n'));
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: join(dir, 'worktree'),
+        notify: { mode: 'command', command: [process.execPath, hookPath, hookOutPath] },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'canary', '--config', configPath, '--all'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: '/nonexistent-gh' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(statePath), false);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.kind, 'canary');
+    assert.equal(summary.notifyMode, 'command');
+    const hookOutput = JSON.parse(readFileSync(hookOutPath, 'utf8'));
+    assert.match(hookOutput.message, /\[pr-shepherd:target-1\] owner\/repo#1 notifier canary/);
+    assert.equal(hookOutput.target, 'target-1');
+    assert.equal(hookOutput.pr, 'owner/repo#1');
+    assert.equal(hookOutput.url, 'https://github.com/owner/repo/pull/1');
+    assert.equal(hookOutput.kind, 'canary');
+    assert.equal(hookOutput.key, 'canary:target-1');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

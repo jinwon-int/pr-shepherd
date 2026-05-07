@@ -8,6 +8,7 @@ Small operational CLI to watch and conservatively repair `openclaw/openclaw#7826
 node pr-shepherd.mjs validate --config config.json
 node pr-shepherd.mjs status --config config.json
 node pr-shepherd.mjs status --config config.json --all
+node pr-shepherd.mjs canary --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs check --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json --all
@@ -254,6 +255,9 @@ If optional type checks fail due missing/stale dependencies, the CLI runs `pnpm 
 MVP default is `notify.mode=stdout` so OpenClaw cron/systemd can capture output and route summaries.
 Set `notify.mode=none` to keep only the final JSON status output.
 
+Before enabling a hook in a timer, run `canary --config config.json --target <id>` to exercise the
+configured notifier without contacting GitHub, writing state, touching a worktree, or mutating a branch.
+
 For notifier hooks, set `notify.mode=command` and provide an argv array:
 
 ```json
@@ -263,10 +267,11 @@ For notifier hooks, set `notify.mode=command` and provide an argv array:
 }
 ```
 
-The formatted notification line is passed in the `PR_SHEPHERD_MESSAGE` environment variable. The
-notifier hook receives no stdin from PR Shepherd, and its configured argv is executed directly without
-a shell. Hook failures are allowed so a flaky notifier cannot block state updates; use the process logs
-or your notifier's own telemetry to alert on delivery problems.
+The formatted notification line is passed in the `PR_SHEPHERD_MESSAGE` environment variable. Hooks also
+receive `PR_SHEPHERD_TARGET`, `PR_SHEPHERD_PR`, `PR_SHEPHERD_URL`, `PR_SHEPHERD_KIND`, and
+`PR_SHEPHERD_KEY` for routing/idempotency. The notifier hook receives no stdin from PR Shepherd, and its
+configured argv is executed directly without a shell. Hook failures are allowed so a flaky notifier cannot
+block state updates; use the process logs or your notifier's own telemetry to alert on delivery problems.
 
 Notifier hook requirements:
 
