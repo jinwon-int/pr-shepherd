@@ -5,6 +5,9 @@ Small operational CLI to watch and conservatively repair `openclaw/openclaw#7826
 ## Commands
 
 ```bash
+node pr-shepherd.mjs validate --config config.json
+node pr-shepherd.mjs status --config config.json
+node pr-shepherd.mjs status --config config.json --all
 node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs check --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json --all
@@ -62,6 +65,32 @@ out of branch diffs and evidence. Fail closed before PR creation if any of these
 would be committed or attached: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
 `IDENTITY.md`, or `.openclaw/**`. PR Shepherd applies the same guard before writing conflict
 artifact evidence or pushing a repaired branch.
+
+## Production readiness commands
+
+`validate` is read-only and fails closed before any GitHub or git mutation when config has unsafe or
+ambiguous production settings. It checks target identity, required branches and paths, duplicate enabled
+`statePath`/`lockPath`, positive `autoPushLimit24h`, conflict policy shape, duplicate conflict paths
+across tiers, notifier mode shape, and obvious secret-looking values such as embedded tokens or
+credentialed URLs.
+
+`status` is also read-only and does not contact GitHub. It summarizes the selected target state file(s),
+including disabled state, last kind, mergeability fields, last seen head/base, failure names, pending
+count, recent auto-push count, and the last notification key.
+
+Safe check-only rollout:
+
+1. Install this repo on the operator host and configure `gh` with least privilege.
+2. Prepare `config.json`; keep tokens in auth tooling or environment, not in config.
+3. Run `node pr-shepherd.mjs validate --config config.json`.
+4. Run `node pr-shepherd.mjs check --config config.json --all`.
+5. Run `node pr-shepherd.mjs repair --config config.json --all --dry-run`.
+6. Install only a check timer first, e.g. `check --config <repo>/config.json --all`.
+7. Observe `status --all`, stdout/command notifications, and state files.
+8. Enable live `repair --target <id>` only later, one target at a time, after explicit operator approval.
+
+Notifier modes are `stdout`, `none`, or `command`. Command notifiers receive the rendered notification in
+`PR_SHEPHERD_MESSAGE`; do not pass secrets in notifier arguments, and keep notification dedupe per target.
 
 ## Status classification
 

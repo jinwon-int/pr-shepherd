@@ -41,7 +41,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/repair.`);
   process.exit(exitCode);
 }
 
@@ -52,7 +52,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['check', 'repair'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'check', 'repair'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -85,6 +85,189 @@ function parseArgs(argv) {
 function loadJson(path, fallback) {
   if (!existsSync(path)) return fallback;
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isEnabledTarget(target) {
+  return target?.enabled !== false;
+}
+
+function configPathPrefix(path, key) {
+  return path ? `${path}.${key}` : key;
+}
+
+function normalizeConfigPath(baseDir, value) {
+  return resolve(baseDir, String(value));
+}
+
+function validateRequiredString(errors, target, targetPath, field) {
+  if (typeof target[field] !== 'string' || target[field].trim() === '') {
+    errors.push(`${targetPath}.${field} is required`);
+  }
+}
+
+function validatePositiveNumber(errors, target, targetPath, field) {
+  if (target[field] !== undefined && (!Number.isFinite(Number(target[field])) || Number(target[field]) <= 0)) {
+    errors.push(`${targetPath}.${field} must be a positive number`);
+  }
+}
+
+function secretLookingValues(value, path = 'config', out = []) {
+  if (typeof value === 'string') {
+    const lowerPath = path.toLowerCase();
+    const hasSecretKey = /(^|[.\[\]_-])(token|secret|password|authorization|credential|api[_-]?key)($|[.\[\]_-])/i.test(lowerPath);
+    const looksLikeSecret = /gh[pousr]_[A-Za-z0-9_]{20,}/.test(value)
+      || /https?:\/\/[^/\s:@]+:[^@\s]+@/i.test(value)
+      || /x-access-token:/i.test(value)
+      || (hasSecretKey && value.trim() !== '' && !/^(env:|\$\{|<|redacted|\[redacted\]|example|changeme)/i.test(value.trim()));
+    if (looksLikeSecret) out.push(path);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => secretLookingValues(item, `${path}[${index}]`, out));
+    return out;
+  }
+  if (isPlainObject(value)) {
+    for (const [key, item] of Object.entries(value)) secretLookingValues(item, configPathPrefix(path, key), out);
+  }
+  return out;
+}
+
+function validatePolicyEntry(errors, targetPath, tier, entry, index) {
+  const entryPath = `${targetPath}.conflictPolicy.${tier}[${index}]`;
+  if (typeof entry === 'string') {
+    if (entry.trim() === '') errors.push(`${entryPath} must not be empty`);
+    if (tier === 'autoSafe') errors.push(`${entryPath} must be an object with a deterministic resolver`);
+    return entry.trim() ? { path: entry.trim(), entryPath, resolver: null } : null;
+  }
+  if (!isPlainObject(entry)) {
+    errors.push(`${entryPath} must be a path string or object with path`);
+    return null;
+  }
+  if (typeof entry.path !== 'string' || entry.path.trim() === '') {
+    errors.push(`${entryPath}.path is required`);
+    return null;
+  }
+  if (entry.path.includes('..')) errors.push(`${entryPath}.path must be repo-relative and must not contain ..`);
+  if (tier === 'autoSafe') {
+    if (entry.resolver !== 'merge-changelog-top-entry') errors.push(`${entryPath}.resolver must be merge-changelog-top-entry for autoSafe entries`);
+    if (entry.resolver === 'merge-changelog-top-entry' && typeof entry.needle !== 'string') errors.push(`${entryPath}.needle is required for merge-changelog-top-entry`);
+  }
+  return { path: entry.path.trim(), entryPath, resolver: entry.resolver || null };
+}
+
+function validateConflictPolicy(errors, target, targetPath) {
+  const policy = target.conflictPolicy;
+  if (policy === undefined) return;
+  if (!isPlainObject(policy)) {
+    errors.push(`${targetPath}.conflictPolicy must be an object`);
+    return;
+  }
+  const allowedTiers = ['autoSafe', 'codeAssisted', 'humanOnly'];
+  for (const key of Object.keys(policy)) {
+    if (!allowedTiers.includes(key)) errors.push(`${targetPath}.conflictPolicy.${key} is not a supported tier`);
+  }
+  const pathsByTier = new Map();
+  for (const tier of allowedTiers) {
+    if (policy[tier] === undefined) continue;
+    if (!Array.isArray(policy[tier])) {
+      errors.push(`${targetPath}.conflictPolicy.${tier} must be an array`);
+      continue;
+    }
+    policy[tier].forEach((entry, index) => {
+      const normalized = validatePolicyEntry(errors, targetPath, tier, entry, index);
+      if (!normalized) return;
+      const existing = pathsByTier.get(normalized.path) || [];
+      existing.push({ tier, entryPath: normalized.entryPath });
+      pathsByTier.set(normalized.path, existing);
+    });
+  }
+  for (const [conflictPath, occurrences] of pathsByTier.entries()) {
+    const tiers = [...new Set(occurrences.map((entry) => entry.tier))];
+    if (tiers.length > 1) {
+      errors.push(`${targetPath}.conflictPolicy duplicates ${conflictPath} across tiers: ${tiers.join(', ')}`);
+    }
+  }
+}
+
+export function validateConfigObject(cfg, configPath = null) {
+  const errors = [];
+  const warnings = [];
+  const configDir = configPath ? dirname(resolve(configPath)) : process.cwd();
+  if (!isPlainObject(cfg) || !Array.isArray(cfg.targets) || cfg.targets.length === 0) {
+    errors.push('config must contain non-empty targets[]');
+    return { ok: false, errors, warnings };
+  }
+
+  const ids = new Map();
+  const enabledStatePaths = new Map();
+  const enabledLockPaths = new Map();
+  cfg.targets.forEach((target, index) => {
+    const targetPath = `targets[${index}]`;
+    if (!isPlainObject(target)) {
+      errors.push(`${targetPath} must be an object`);
+      return;
+    }
+    if (typeof target.id !== 'string' || target.id.trim() === '') errors.push(`${targetPath}.id is required`);
+    else {
+      const existing = ids.get(target.id) || [];
+      existing.push(targetPath);
+      ids.set(target.id, existing);
+    }
+
+    const parsed = parsePrRef(target.pr);
+    if (!target.owner && !parsed?.owner) errors.push(`${targetPath}.owner is required`);
+    if (!target.repo && !parsed?.repo) errors.push(`${targetPath}.repo is required`);
+    const number = Number(target.number || parsed?.number);
+    if (!Number.isInteger(number) || number <= 0) errors.push(`${targetPath}.number is required and must be a positive integer`);
+
+    if (isEnabledTarget(target)) {
+      validateRequiredString(errors, target, targetPath, 'headBranch');
+      validateRequiredString(errors, target, targetPath, 'baseBranch');
+      validateRequiredString(errors, target, targetPath, 'worktreePath');
+      validateRequiredString(errors, target, targetPath, 'statePath');
+      validateRequiredString(errors, target, targetPath, 'lockPath');
+      if (typeof target.statePath === 'string' && target.statePath.trim()) {
+        const key = normalizeConfigPath(configDir, target.statePath);
+        const existing = enabledStatePaths.get(key) || [];
+        existing.push(targetPath);
+        enabledStatePaths.set(key, existing);
+      }
+      if (typeof target.lockPath === 'string' && target.lockPath.trim()) {
+        const key = normalizeConfigPath(configDir, target.lockPath);
+        const existing = enabledLockPaths.get(key) || [];
+        existing.push(targetPath);
+        enabledLockPaths.set(key, existing);
+      }
+    }
+
+    validatePositiveNumber(errors, target, targetPath, 'autoPushLimit24h');
+    validateConflictPolicy(errors, target, targetPath);
+
+    if (target.notify !== undefined) {
+      if (!isPlainObject(target.notify)) errors.push(`${targetPath}.notify must be an object`);
+      else if (target.notify.mode !== undefined && !['stdout', 'none', 'command'].includes(target.notify.mode)) errors.push(`${targetPath}.notify.mode must be stdout, none, or command`);
+      else if (target.notify.mode === 'command' && (!Array.isArray(target.notify.command) || target.notify.command.length === 0 || !target.notify.command.every((item) => typeof item === 'string' && item.length > 0))) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+    }
+  });
+
+  for (const [id, occurrences] of ids.entries()) {
+    if (occurrences.length > 1) errors.push(`duplicate target id ${id}: ${occurrences.join(', ')}`);
+  }
+  for (const [statePath, occurrences] of enabledStatePaths.entries()) {
+    if (occurrences.length > 1) errors.push(`duplicate enabled target statePath ${statePath}: ${occurrences.join(', ')}`);
+  }
+  for (const [lockPath, occurrences] of enabledLockPaths.entries()) {
+    if (occurrences.length > 1) errors.push(`duplicate enabled target lockPath ${lockPath}: ${occurrences.join(', ')}`);
+  }
+
+  const secretPaths = secretLookingValues(cfg);
+  for (const path of secretPaths) errors.push(`secret-looking value in ${path}; use environment/auth tooling instead of config`);
+
+  return { ok: errors.length === 0, errors, warnings };
 }
 
 function saveJson(path, value) {
@@ -182,15 +365,9 @@ function normalizeTarget(target, index) {
 
 function loadConfig(path) {
   const cfg = loadJson(resolve(path), null);
-  if (!cfg || !Array.isArray(cfg.targets) || cfg.targets.length === 0) throw new Error('config must contain targets[]');
+  const validation = validateConfigObject(cfg, path);
+  if (!validation.ok) throw new Error(`config validation failed:\n${validation.errors.join('\n')}`);
   const targets = cfg.targets.map(normalizeTarget);
-  const seenIds = new Set();
-  const duplicateIds = [];
-  for (const target of targets) {
-    if (seenIds.has(target.id)) duplicateIds.push(target.id);
-    seenIds.add(target.id);
-  }
-  if (duplicateIds.length > 0) throw new Error(`duplicate target id(s): ${[...new Set(duplicateIds)].join(', ')}`);
   return { ...cfg, targets };
 }
 
@@ -217,6 +394,32 @@ export function selectTargets(cfg, selectors = [], allTargets = false) {
     if (!selected.some((target) => target.id === matches[0].id)) selected.push(matches[0]);
   }
   return selected;
+}
+
+export function buildStatusRows(targets, now = Date.now()) {
+  return targets.map((target) => {
+    const stateFile = target.statePath && existsSync(target.statePath) ? loadJson(target.statePath, {}) : {};
+    const state = { ...defaultState(target), ...stateFile };
+    return {
+      target: target.id,
+      pr: target.pr,
+      statePath: target.statePath || null,
+      stateExists: Boolean(target.statePath && existsSync(target.statePath)),
+      configEnabled: isEnabledTarget(target),
+      disabled: Boolean(state.disabled),
+      lastKind: state.lastKind || null,
+      lastMergeable: state.lastMergeable || null,
+      lastMergeStateStatus: state.lastMergeStateStatus || null,
+      lastSeenHeadOid: state.lastSeenHeadOid || null,
+      lastSeenBaseOid: state.lastSeenBaseOid || null,
+      lastFailureNames: state.lastFailureNames || [],
+      lastPendingCount: state.lastPendingCount || 0,
+      recentAutoPushCount: recentAutoPushes(state, now).length,
+      lastNotificationKey: state.lastNotificationKey || null,
+      lastRunAt: state.lastRunAt || null,
+      lastOkAt: state.lastOkAt || null,
+    };
+  });
 }
 
 function ghPrView(target) {
@@ -641,11 +844,23 @@ export function orchestrateTargets(targets, args) {
 
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
+  if (args.cmd === 'validate') {
+    const report = validateConfigObject(loadJson(resolve(args.config), null), args.config);
+    console.log(JSON.stringify(report, null, 2));
+    if (!report.ok) process.exitCode = 1;
+    return report;
+  }
+
   const cfg = loadConfig(args.config);
   if (!args.allTargets && args.targetSelectors.length === 0 && cfg.targets.length > 1) {
     console.error('Warning: no --target or --all supplied; processing first configured target for backward compatibility. Use --all to process every target.');
   }
   const targets = selectTargets(cfg, args.targetSelectors, args.allTargets);
+  if (args.cmd === 'status') {
+    const rows = buildStatusRows(targets);
+    console.log(JSON.stringify(targets.length === 1 ? rows[0] : { command: 'status', targets: rows }, null, 2));
+    return rows;
+  }
   orchestrateTargets(targets, args);
 }
 

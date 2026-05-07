@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   buildConflictArtifactPayload,
+  buildStatusRows,
   classifyChecks,
   classifyConflictSet,
   classifyPr,
@@ -14,6 +15,7 @@ import {
   notificationKey,
   resolveChangelogConflict,
   selectTargets,
+  validateConfigObject,
 } from './pr-shepherd.mjs';
 
 const base = {
@@ -25,6 +27,28 @@ const base = {
   mergeStateStatus: 'CLEAN',
   statusCheckRollup: [],
 };
+
+function validationTarget(overrides = {}) {
+  return {
+    id: 'target-1',
+    owner: 'owner',
+    repo: 'repo',
+    number: 1,
+    headBranch: 'feature',
+    baseBranch: 'main',
+    worktreePath: '/tmp/pr-shepherd/worktree-1',
+    statePath: '/tmp/pr-shepherd/state-1.json',
+    lockPath: '/tmp/pr-shepherd/lock-1.lock',
+    autoPushLimit24h: 5,
+    conflictPolicy: {
+      autoSafe: [{ path: 'CHANGELOG.md', resolver: 'merge-changelog-top-entry', needle: 'Release note' }],
+      codeAssisted: ['src/example.ts'],
+      humanOnly: ['pnpm-lock.yaml'],
+    },
+    notify: { mode: 'stdout' },
+    ...overrides,
+  };
+}
 
 test('selectTargets preserves first-target default and supports explicit all-target orchestration', () => {
   const cfg = {
@@ -48,6 +72,90 @@ test('findOpenClawRuntimeContextPaths reports only root runtime context paths', 
     'src/HEARTBEAT.md',
     'TOOLS.md',
   ]), ['.openclaw/workspace-state.json', 'AGENTS.md', 'TOOLS.md']);
+});
+
+test('validateConfigObject accepts a production-ready target config', () => {
+  const report = validateConfigObject({ targets: [validationTarget()] });
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.errors, []);
+});
+
+test('validateConfigObject rejects missing required fields, invalid push limits, and secrets', () => {
+  const report = validateConfigObject({
+    targets: [validationTarget({
+      headBranch: '',
+      autoPushLimit24h: 0,
+      remotes: { origin: 'https://x-access-token:ghp_12345678901234567890@github.com/owner/repo.git' },
+    })],
+  });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /targets\[0\]\.headBranch is required/);
+  assert.match(report.errors.join('\n'), /autoPushLimit24h must be a positive number/);
+  assert.match(report.errors.join('\n'), /secret-looking value in config\.targets\[0\]\.remotes\.origin/);
+});
+
+test('validateConfigObject rejects duplicate target ids and enabled state or lock paths', () => {
+  const report = validateConfigObject({
+    targets: [
+      validationTarget(),
+      validationTarget({ id: 'target-1', number: 2, worktreePath: '/tmp/pr-shepherd/worktree-2' }),
+    ],
+  });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /duplicate target id target-1/);
+  assert.match(report.errors.join('\n'), /duplicate enabled target statePath/);
+  assert.match(report.errors.join('\n'), /duplicate enabled target lockPath/);
+});
+
+test('validateConfigObject rejects duplicate conflict paths across policy tiers', () => {
+  const report = validateConfigObject({
+    targets: [validationTarget({
+      conflictPolicy: {
+        autoSafe: [{ path: 'CHANGELOG.md', resolver: 'merge-changelog-top-entry', needle: 'Release note' }],
+        codeAssisted: ['CHANGELOG.md'],
+        humanOnly: [],
+      },
+    })],
+  });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /duplicates CHANGELOG\.md across tiers: autoSafe, codeAssisted/);
+});
+
+test('status command reads state files without network access', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-status-'));
+  try {
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    writeFileSync(statePath, JSON.stringify({
+      disabled: false,
+      lastKind: 'failed',
+      lastMergeable: 'MERGEABLE',
+      lastMergeStateStatus: 'UNSTABLE',
+      lastSeenHeadOid: 'head-a',
+      lastSeenBaseOid: 'base-a',
+      lastFailureNames: ['lint'],
+      lastPendingCount: 1,
+      lastNotificationKey: 'failed:head-a:lint',
+      autoPushes: [{ at: new Date().toISOString(), from: 'old', to: 'new' }],
+    }));
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({ statePath, lockPath: join(dir, 'lock'), worktreePath: join(dir, 'worktree') })],
+    }));
+    assert.equal(buildStatusRows([validationTarget({ statePath })])[0].lastKind, 'failed');
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'status', '--config', configPath, '--all'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: '/nonexistent-gh' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const status = JSON.parse(result.stdout);
+    assert.equal(status.target, 'target-1');
+    assert.equal(status.lastKind, 'failed');
+    assert.deepEqual(status.lastFailureNames, ['lint']);
+    assert.equal(status.recentAutoPushCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('classifies clean PR', () => {
