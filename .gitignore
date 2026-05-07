@@ -4,3 +4,11 @@ coverage/
 .DS_Store
 state/
 *.lock
+# OpenClaw runner/bootstrap context; never commit local operator context.
+AGENTS.md
+SOUL.md
+USER.md
+TOOLS.md
+HEARTBEAT.md
+IDENTITY.md
+.openclaw/
