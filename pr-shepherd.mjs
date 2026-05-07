@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 export const PR_FIELDS = [
   'number', 'state', 'mergeable', 'mergeStateStatus', 'mergedAt', 'headRefOid',
-  'headRefName', 'baseRefName', 'baseRefOid', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
+  'headRefName', 'baseRefName', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
 ];
 
 function usage(exitCode = 1) {
@@ -173,7 +173,6 @@ function notify(target, state, key, message, force = false) {
 function updateStateFromPr(state, pr, classification) {
   state.lastRunAt = new Date().toISOString();
   state.lastSeenHeadOid = pr.headRefOid || state.lastSeenHeadOid;
-  state.lastSeenBaseOid = pr.baseRefOid || state.lastSeenBaseOid;
   state.lastMergeable = pr.mergeable || null;
   state.lastMergeStateStatus = pr.mergeStateStatus || null;
   state.lastFailureNames = classification.checks.failed.map((c) => c.name);
