@@ -42,6 +42,39 @@ or all-target.
   - `humanOnly`: lockfiles, broad generated/security-sensitive files, unlisted paths, or unrelated subsystems stop immediately for manual handling.
 - Merged PRs mark state as `disabled`.
 
+## Automatic action operating model
+
+PR Shepherd separates automatic observation from operator-approved mutation. Routine automation should
+run only read-only commands from a scheduler, while every command that can touch a worktree or branch is
+kept as an explicit, logged, one-shot operator action.
+
+Automatic scheduler lanes:
+
+- `validate`: local config validation only; use it before rollout and after every config change.
+- `status`: local state summary only; safe for audits and rollback evidence.
+- `canary`: notifier rendering and delivery smoke test only; it does not contact GitHub or update target state.
+- `check` / `check-canary`: GitHub PR classification, target state updates, and deduplicated notifications only.
+
+Commands that require operator approval:
+
+- `rehearse` and `repair --dry-run`: allowed after an operator asks for investigation; they may prepare repair
+  evidence but must not push.
+- live `repair`: allowed only after the operator names the target PR, confirms write credentials and worktree
+  readiness, and accepts the expected branch mutation. Prefer `--target <id>`; avoid all-target live repair unless
+  a single approval explicitly covers every listed target.
+
+Roll out in this order: validate the config, run a local notifier canary, run one manual `check-canary`, install
+one check-only timer for one target, observe at least two intervals, then add more check-only targets. Promotion
+never grants repair approval; repair remains a separate one-shot decision.
+
+Rollback is non-destructive: disable the scheduler, run `status` for final evidence, keep or move aside state for
+audit, and leave repair/worktrees untouched. Do not rebase, write artifacts, or push as part of rollback.
+
+Approval and evidence boundaries are fail-closed. Logs, notifications, PR comments, and artifacts should identify
+the command, target id, operator approval, and result, but must not include secrets, private host paths, or
+OpenClaw runtime/bootstrap context files. If those files would enter a branch diff or evidence bundle, stop before
+PR creation and report the repo-relative offending paths.
+
 ## Code-assisted operations and approval gates
 
 PR Shepherd is intended to assist a human operator, not to make broad autonomous code changes.
@@ -64,6 +97,14 @@ A live repair still fails closed unless every gate below passes:
 
 Unsupported conflicts, CI failures, stale remotes, dirty worktrees, repeated repair failures, or exhausted
 push budgets are notification-only outcomes that require human intervention.
+
+Automatic action planning is explicit and fail-closed. `check`/`check-canary` may refresh state and notify,
+`rehearse`/`repair --dry-run` records recent rehearsal evidence without branch mutation, and conflict handling
+plans either deterministic `autoSafe` repair or artifact/escalation. Live branch mutation is blocked unless
+`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvedAt`, `approvedBy`,
+a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
+and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
+that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`.
 
 When preparing code-assisted patches for this repository, also keep OpenClaw runtime/bootstrap context
 out of branch diffs and evidence. Fail closed before PR creation if any of these repo-relative paths

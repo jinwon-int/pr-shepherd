@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  AUTOMATIC_ACTION_CLASSES,
   buildConflictArtifactPayload,
   buildSituationReportLine,
   buildStatusRows,
@@ -12,8 +13,11 @@ import {
   classifyConflictSet,
   classifyPr,
   conflictSetKey,
+  executeAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   notificationKey,
+  planAutomaticAction,
+  planConflictAutomaticAction,
   resolveChangelogConflict,
   selectTargets,
   validateConfigObject,
@@ -200,6 +204,30 @@ test('validateConfigObject rejects duplicate conflict paths across policy tiers'
   assert.match(report.errors.join('\n'), /duplicates CHANGELOG\.md across tiers: autoSafe, codeAssisted/);
 });
 
+test('validateConfigObject requires explicit live auto-repair gates when enabled', () => {
+  const bad = validateConfigObject({ targets: [validationTarget({ automaticActions: { liveRepair: { enabled: true } } })] });
+  assert.equal(bad.ok, false);
+  assert.match(bad.errors.join('\n'), /liveRepair\.scope must be auto-safe-repair/);
+  assert.match(bad.errors.join('\n'), /liveRepair\.approvedAt must be an ISO-8601 timestamp/);
+  assert.match(bad.errors.join('\n'), /liveRepair\.approvedBy is required/);
+  assert.match(bad.errors.join('\n'), /liveRepair\.branchAllowlist must be a non-empty string array/);
+
+  const good = validateConfigObject({
+    targets: [validationTarget({
+      automaticActions: {
+        liveRepair: {
+          enabled: true,
+          scope: 'auto-safe-repair',
+          approvedAt: '2026-05-08T05:00:00Z',
+          approvedBy: 'operator',
+          branchAllowlist: ['feature'],
+        },
+      },
+    })],
+  });
+  assert.equal(good.ok, true);
+});
+
 test('status command reads state files without network access', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-status-'));
   try {
@@ -242,6 +270,22 @@ function writeFakeGh(binDir, pr) {
   const ghPath = join(binDir, 'gh');
   writeFileSync(ghPath, `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(pr))});\n`);
   chmodSync(ghPath, 0o755);
+}
+
+function writeFakeGhSequence(binDir, prs) {
+  mkdirSync(binDir, { recursive: true });
+  const ghPath = join(binDir, 'gh');
+  const countPath = join(binDir, 'gh-count.txt');
+  writeFileSync(ghPath, `#!${process.execPath}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const countPath = ${JSON.stringify(countPath)};
+const prs = ${JSON.stringify(prs)};
+const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) : 0;
+writeFileSync(countPath, String(count + 1));
+console.log(JSON.stringify(prs[Math.min(count, prs.length - 1)]));
+`);
+  chmodSync(ghPath, 0o755);
+  return countPath;
 }
 
 test('buildSituationReportLine includes no-action next action for healthy PRs', () => {
@@ -487,6 +531,48 @@ test('check-canary is explicit check-only monitoring and does not require a work
   }
 });
 
+test('check-canary rechecks transient UNKNOWN mergeability before reporting action needed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-check-canary-unknown-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGhSequence(fakeBin, [
+      { ...base, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' },
+      base,
+    ]);
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'none' },
+        unknownRecheckAttempts: 2,
+        unknownRecheckDelayMs: 0,
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check-canary', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(missingWorktree), false);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.kind, 'clean');
+    assert.equal(summary.mergeable, 'MERGEABLE');
+    assert.equal(summary.mergeStateStatus, 'CLEAN');
+    assert.equal(summary.rechecks, 1);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.lastKind, 'clean');
+    assert.equal(state.lastMergeable, 'MERGEABLE');
+    assert.equal(state.lastUnknownRecheckCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('rehearse is an approval-gated dry-run repair alias that stops before git mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-rehearse-'));
   try {
@@ -525,6 +611,38 @@ test('rehearse rejects push approval flags', () => {
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /--allow-code-assisted-push is not allowed/);
+});
+
+test('live repair command fails closed before worktree access without live auto-action config', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-live-policy-block-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGh(fakeBin, { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'none' },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'repair', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /automatic action blocked/);
+    assert.equal(existsSync(missingWorktree), false);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.lastAutomaticActionPlan.actionClass, AUTOMATIC_ACTION_CLASSES.BLOCK);
+    assert.match(state.lastActionSummary, /automatic action blocked/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('classifies clean PR', () => {
@@ -569,6 +687,87 @@ test('classifyChecks treats success/skipped/neutral as non-failures', () => {
   assert.equal(c.pending.length, 0);
 });
 
+test('automatic action planner fails closed for unknown, failed, and ungated dirty live states', () => {
+  const target = validationTarget({ headOwner: 'contributor', baseOwner: 'owner' });
+  const unknown = planAutomaticAction(target, {}, { ...base, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }, { kind: 'unknown', checks: { failed: [], pending: [] } });
+  assert.equal(unknown.actionClass, AUTOMATIC_ACTION_CLASSES.RECHECK);
+  assert.equal(unknown.pushAllowed, false);
+
+  const failed = planAutomaticAction(target, {}, { ...base }, { kind: 'failed', checks: { failed: [{ name: 'lint' }], pending: [] } });
+  assert.equal(failed.actionClass, AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE);
+  assert.equal(failed.pushAllowed, false);
+
+  const dirtyLive = planAutomaticAction(target, {}, { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }, { kind: 'dirty', checks: { failed: [], pending: [] } }, { dryRun: false, now: 0 });
+  assert.equal(dirtyLive.actionClass, AUTOMATIC_ACTION_CLASSES.BLOCK);
+  assert.equal(dirtyLive.allowed, false);
+  assert.match(dirtyLive.reasons.join('\n'), /liveRepair\.enabled/);
+  assert.throws(() => executeAutomaticActionPlan(dirtyLive), /automatic action blocked/);
+});
+
+test('automatic action planner records rehearsal before permitting gated live repair', () => {
+  const target = validationTarget({
+    headOwner: 'contributor',
+    baseOwner: 'owner',
+    automaticActions: {
+      liveRepair: {
+        enabled: true,
+        scope: 'auto-safe-repair',
+        approvedAt: '2026-05-08T05:00:00Z',
+        approvedBy: 'operator',
+        branchAllowlist: ['feature'],
+        rehearsalMaxAgeMs: 10000,
+      },
+    },
+  });
+  const pr = { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const rehearsal = planAutomaticAction(target, {}, pr, classification, { dryRun: true, now: 1000 });
+  assert.equal(rehearsal.actionClass, AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL);
+  assert.equal(rehearsal.pushAllowed, false);
+
+  const missingRehearsal = planAutomaticAction(target, {}, pr, classification, { dryRun: false, now: 1000 });
+  assert.equal(missingRehearsal.allowed, false);
+  assert.match(missingRehearsal.reasons.join('\n'), /rehearsal evidence is required/);
+
+  const state = {
+    lastRepairRehearsal: {
+      at: new Date(1000).toISOString(),
+      target: 'target-1',
+      repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+      headRefOid: 'abc123',
+      baseOid: 'base-a',
+    },
+  };
+  const live = planAutomaticAction(target, state, pr, classification, { dryRun: false, now: 2000 });
+  assert.equal(live.actionClass, AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR);
+  assert.equal(live.allowed, true);
+  assert.equal(live.pushAllowed, true);
+  assert.equal(live.mutatesBranch, true);
+});
+
+test('automatic action planner enforces branch allowlist and maintainer boundary', () => {
+  const target = validationTarget({
+    headOwner: 'owner',
+    baseOwner: 'owner',
+    automaticActions: {
+      liveRepair: {
+        enabled: true,
+        scope: 'auto-safe-repair',
+        approvedAt: '2026-05-08T05:00:00Z',
+        approvedBy: 'operator',
+        branchAllowlist: ['other-branch'],
+        requireRecentRehearsal: false,
+      },
+    },
+  });
+  const pr = { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const plan = planAutomaticAction(target, {}, pr, classification, { dryRun: false });
+  assert.equal(plan.allowed, false);
+  assert.match(plan.reasons.join('\n'), /not in automaticActions\.liveRepair\.branchAllowlist/);
+  assert.match(plan.reasons.join('\n'), /maintainer-owned head branches/);
+});
+
 const conflictPolicyTarget = {
   id: 'openclaw-78261',
   pr: 'openclaw/openclaw#78261',
@@ -601,6 +800,25 @@ test('classifies codeAssisted TypeScript conflict with push blocked by default',
   assert.equal(c.tier, 'codeAssisted');
   assert.equal(c.requiresApproval, true);
   assert.equal(c.pushBlocked, true);
+});
+
+test('conflict planner creates artifacts for assisted conflicts but only plans autoSafe mutation', () => {
+  const autoSafe = planConflictAutomaticAction(classifyConflictSet(['CHANGELOG.md'], conflictPolicyTarget), ['CHANGELOG.md']);
+  assert.equal(autoSafe.actionClass, AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR);
+  assert.equal(autoSafe.pushAllowed, true);
+
+  const assisted = planConflictAutomaticAction(
+    classifyConflictSet(['extensions/telegram/src/outbound-adapter.ts'], conflictPolicyTarget),
+    ['extensions/telegram/src/outbound-adapter.ts'],
+  );
+  assert.equal(assisted.actionClass, AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT);
+  assert.equal(assisted.writesArtifact, true);
+  assert.equal(assisted.pushAllowed, false);
+
+  const humanOnly = planConflictAutomaticAction(classifyConflictSet(['pnpm-lock.yaml'], conflictPolicyTarget), ['pnpm-lock.yaml']);
+  assert.equal(humanOnly.actionClass, AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE);
+  assert.equal(humanOnly.pushAllowed, false);
+  assert.equal(humanOnly.requiresOperatorApproval, true);
 });
 
 test('classifies lockfile conflict as humanOnly', () => {
