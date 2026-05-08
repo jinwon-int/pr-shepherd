@@ -18,6 +18,8 @@ export const OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES = [
   'IDENTITY.md',
 ];
 
+export const DEFAULT_SITUATION_REPORT_EVERY_MS = 6 * 60 * 60 * 1000;
+
 export function findOpenClawRuntimeContextPaths(paths = []) {
   const rootFiles = new Set(OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES);
   const offending = [];
@@ -253,8 +255,26 @@ export function validateConfigObject(cfg, configPath = null) {
 
     if (target.notify !== undefined) {
       if (!isPlainObject(target.notify)) errors.push(`${targetPath}.notify must be an object`);
-      else if (target.notify.mode !== undefined && !['stdout', 'none', 'command'].includes(target.notify.mode)) errors.push(`${targetPath}.notify.mode must be stdout, none, or command`);
-      else if (target.notify.mode === 'command' && (!Array.isArray(target.notify.command) || target.notify.command.length === 0 || !target.notify.command.every((item) => typeof item === 'string' && item.length > 0))) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+      else {
+        const notifyMode = target.notify.mode;
+        const hasCommand = Array.isArray(target.notify.command)
+          && target.notify.command.length > 0
+          && target.notify.command.every((item) => typeof item === 'string' && item.length > 0);
+        if (notifyMode !== undefined && !['stdout', 'none', 'command', 'openclaw'].includes(notifyMode)) errors.push(`${targetPath}.notify.mode must be stdout, none, command, or openclaw`);
+        if (target.notify.command !== undefined && !hasCommand) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+        if (notifyMode === 'command' && !hasCommand) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+        if (target.notify.situationReportEveryMs !== undefined
+          && (!Number.isFinite(Number(target.notify.situationReportEveryMs)) || Number(target.notify.situationReportEveryMs) < 0)) {
+          errors.push(`${targetPath}.notify.situationReportEveryMs must be a non-negative number`);
+        }
+        if (notifyMode === 'openclaw') {
+          if (target.notify.dryRun !== undefined && typeof target.notify.dryRun !== 'boolean') errors.push(`${targetPath}.notify.dryRun must be a boolean`);
+          if (target.notify.dryRun === false && !hasCommand) errors.push(`${targetPath}.notify.command is required when notify.mode is openclaw and dryRun is false`);
+          for (const forbidden of ['token', 'botToken', 'gatewayToken', 'chatId', 'chatID', 'chat', 'to']) {
+            if (target.notify[forbidden] !== undefined) errors.push(`${targetPath}.notify.${forbidden} must not be stored in config; keep OpenClaw/Telegram routing and credentials in the operator environment`);
+          }
+        }
+      }
     }
   });
 
@@ -464,24 +484,42 @@ export function notificationKey(kind, pr, checks, extra = '') {
   return `${kind}:${pr.headRefOid || ''}:${pr.mergeable || ''}:${pr.mergeStateStatus || ''}:${extra}`;
 }
 
-function deliverNotification(target, line, meta = {}) {
-  if (target.notify?.mode === 'none') return true;
-  if (target.notify?.mode === 'command' && Array.isArray(target.notify.command)) {
-    const [cmd, ...args] = target.notify.command;
-    run(cmd, args, {
-      env: {
-        PR_SHEPHERD_MESSAGE: line,
-        PR_SHEPHERD_TARGET: String(target.id || ''),
-        PR_SHEPHERD_PR: String(target.pr || ''),
-        PR_SHEPHERD_URL: String(target.url || ''),
-        PR_SHEPHERD_KIND: String(meta.kind || ''),
-        PR_SHEPHERD_KEY: String(meta.key || ''),
-      },
-      allowFailure: true,
-    });
-  } else {
-    console.log(line);
+function notificationEnv(target, line, meta = {}) {
+  return {
+    PR_SHEPHERD_MESSAGE: line,
+    PR_SHEPHERD_TARGET: String(target.id || ''),
+    PR_SHEPHERD_PR: String(target.pr || ''),
+    PR_SHEPHERD_URL: String(target.url || ''),
+    PR_SHEPHERD_KIND: String(meta.kind || ''),
+    PR_SHEPHERD_KEY: String(meta.key || ''),
+    PR_SHEPHERD_NOTIFY_MODE: String(target.notify?.mode || 'stdout'),
+  };
+}
+
+function deliverCommandNotification(target, line, meta = {}) {
+  const [cmd, ...args] = target.notify.command;
+  run(cmd, args, {
+    env: notificationEnv(target, line, meta),
+    allowFailure: true,
+  });
+}
+
+function deliverOpenClawNotification(target, line, meta = {}) {
+  const dryRun = target.notify?.dryRun !== false;
+  if (dryRun || !Array.isArray(target.notify?.command)) {
+    console.log(`[pr-shepherd:${target.id}] OpenClaw notify dry-run: ${line}`);
+    return true;
   }
+  deliverCommandNotification(target, line, { ...meta, openclaw: true });
+  return true;
+}
+
+function deliverNotification(target, line, meta = {}) {
+  const mode = target.notify?.mode || 'stdout';
+  if (mode === 'none') return true;
+  if (mode === 'command' && Array.isArray(target.notify.command)) deliverCommandNotification(target, line, meta);
+  else if (mode === 'openclaw') deliverOpenClawNotification(target, line, meta);
+  else console.log(line);
   return true;
 }
 
@@ -489,7 +527,7 @@ function notify(target, state, key, message, force = false) {
   if (!force && state.lastNotificationKey === key) return false;
   state.lastNotificationKey = key;
   const line = `[pr-shepherd:${target.id}] ${message}`;
-  return deliverNotification(target, line, { kind: 'notification', key });
+  return deliverNotification(target, line, { kind: String(key).split(':')[0] || 'notification', key });
 }
 
 export function buildCanaryNotificationLine(target, now = new Date()) {
@@ -524,29 +562,111 @@ function summarizeFailed(checks) {
   return checks.failed.map((c) => `${c.name}${c.conclusion ? `=${c.conclusion}` : ''}${c.detailsUrl ? ` ${c.detailsUrl}` : ''}`).join('; ');
 }
 
+function summarizePending(checks) {
+  return checks.pending.map((c) => `${c.name}${c.status ? `=${c.status}` : ''}${c.detailsUrl ? ` ${c.detailsUrl}` : ''}`).join('; ');
+}
+
+function situationReportEveryMs(target) {
+  if (target.notify?.situationReportEveryMs !== undefined) return Number(target.notify.situationReportEveryMs);
+  return DEFAULT_SITUATION_REPORT_EVERY_MS;
+}
+
+function lastActionSummary(state) {
+  if (state.lastActionSummary) return state.lastActionSummary;
+  if (state.lastConflictTier) {
+    const paths = Array.isArray(state.lastConflictPaths) && state.lastConflictPaths.length > 0
+      ? ` (${state.lastConflictPaths.join(', ')})`
+      : '';
+    return `last conflict=${state.lastConflictTier}${paths}`;
+  }
+  const pushes = Array.isArray(state.autoPushes) ? state.autoPushes : [];
+  const lastPush = pushes[pushes.length - 1];
+  if (lastPush) return `last auto-push ${String(lastPush.from || '').slice(0, 8)}..${String(lastPush.to || '').slice(0, 8)} at ${lastPush.at}`;
+  return 'none recorded';
+}
+
+function nextActionForClassification(classification) {
+  switch (classification.kind) {
+    case 'clean': return 'none — 현재 조치할 것 없음 / no action needed';
+    case 'merged': return 'none — PR merged; target disabled';
+    case 'failed': return 'operator review failed checks; no repair attempted';
+    case 'dirty': return 'run dry-run/rehearsal, then operator approval needed before any repair push';
+    case 'unstable': return 'watch pending checks';
+    case 'disabled': return 'none — target disabled';
+    default: return 'operator review needed';
+  }
+}
+
+function actionNeededForClassification(classification) {
+  return ['clean', 'dirty', 'failed', 'merged', 'unknown'].includes(classification.kind);
+}
+
+export function buildSituationReportLine(target, state, pr, classification) {
+  const failedCount = classification.checks?.failed?.length || 0;
+  const pendingCount = classification.checks?.pending?.length || 0;
+  const prRef = target.pr || `${target.owner}/${target.repo}#${target.number}`;
+  const url = target.url || pr?.url || null;
+  const parts = [
+    `${prRef} situation report`,
+    `target=${target.id}`,
+    `repo=${target.owner}/${target.repo}`,
+    `classification=${classification.kind}`,
+    `mergeable=${pr?.mergeable || state.lastMergeable || 'n/a'}`,
+    `mergeStateStatus=${pr?.mergeStateStatus || state.lastMergeStateStatus || 'n/a'}`,
+    `checks failed=${failedCount} pending=${pendingCount}`,
+    failedCount > 0 ? `failedChecks=${summarizeFailed(classification.checks)}` : null,
+    pendingCount > 0 ? `pendingChecks=${summarizePending(classification.checks)}` : null,
+    `lastAction=${lastActionSummary(state)}`,
+    `nextAction=${nextActionForClassification(classification)}`,
+  ];
+  if (url) parts.push(`url=${url}`);
+  return parts.filter(Boolean).join('; ');
+}
+
+function situationReportKey(pr, classification) {
+  return `situation:${classification.kind}:${notificationKey(classification.kind, pr || {}, classification.checks || { failed: [], pending: [] })}`;
+}
+
+function sendSituationReport(target, state, pr, classification, key, now = new Date()) {
+  state.lastSituationReportKey = key;
+  state.lastSituationReportAt = now.toISOString();
+  state.lastNotificationKey = key;
+  const line = `[pr-shepherd:${target.id}] ${buildSituationReportLine(target, state, pr, classification)}`;
+  return deliverNotification(target, line, { kind: 'situation', key });
+}
+
+function maybeNotifySituationReport(target, state, pr, classification, now = new Date()) {
+  const key = situationReportKey(pr, classification);
+  const cadenceMs = situationReportEveryMs(target);
+  const lastAtMs = Date.parse(state.lastSituationReportAt || '');
+  const cadenceDue = cadenceMs === 0 || !Number.isFinite(lastAtMs) || now.getTime() - lastAtMs >= cadenceMs;
+  const immediateDue = actionNeededForClassification(classification) && state.lastSituationReportKey !== key;
+  if (!immediateDue && !cadenceDue) return false;
+  return sendSituationReport(target, state, pr, classification, key, now);
+}
+
 function handleCheck(target) {
   const state = { ...defaultState(target), ...loadJson(target.statePath, {}) };
   if (state.disabled) {
+    const classification = { kind: 'disabled', checks: { failed: [], pending: [] } };
+    maybeNotifySituationReport(target, state, null, classification);
+    saveJson(target.statePath, state);
     console.log(`[pr-shepherd:${target.id}] disabled`);
-    return { target, state, pr: null, classification: { kind: 'disabled' } };
+    return { target, state, pr: null, classification };
   }
   const pr = ghPrView(target);
   const classification = classifyPr(pr);
-  const previousKind = state.lastKind;
   updateStateFromPr(state, pr, classification);
   state.lastKind = classification.kind;
 
-  if (classification.kind === 'merged') notify(target, state, notificationKey('merged', pr, classification.checks), `${target.pr} merged; disabling future runs`, true);
-  else if (classification.kind === 'clean' && previousKind && !['clean', 'disabled'].includes(previousKind)) notify(target, state, notificationKey('clean', pr, classification.checks), `${target.pr} recovered to CLEAN`);
-  else if (classification.kind === 'failed') notify(target, state, notificationKey('failed', pr, classification.checks), `${target.pr} CI failed: ${summarizeFailed(classification.checks)}`);
-  else if (classification.kind === 'unstable') {
+  if (classification.kind === 'unstable') {
     const pendingSince = state.pendingSince || new Date().toISOString();
     state.pendingSince = pendingSince;
-    const age = Date.now() - Date.parse(pendingSince);
-    if (age >= target.pendingNotifyAfterMs) notify(target, state, notificationKey('pending-long', pr, classification.checks, pendingSince), `${target.pr} pending for ${Math.round(age / 60000)}m (${classification.checks.pending.length} checks)`);
   } else {
     delete state.pendingSince;
   }
+
+  maybeNotifySituationReport(target, state, pr, classification);
 
   saveJson(target.statePath, state);
   console.log(JSON.stringify({ target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, disabled: state.disabled }, null, 2));
@@ -774,6 +894,8 @@ function handleRepair(target, dryRun, opts = {}) {
 
     notify(target, state, `repair-start:${preRepairKey}`, `${target.pr} DIRTY/CONFLICTING; starting ${dryRun ? 'dry-run ' : ''}repair`, true);
     if (dryRun) {
+      state.lastActionSummary = `dry-run/rehearsal stopped before git mutation at ${new Date().toISOString()}`;
+      sendSituationReport(target, state, pr, classification, `situation:dry-run:${preRepairKey}`);
       saveJson(target.statePath, state);
       console.log(`[pr-shepherd:${target.id}] dry-run stops before git mutation`);
       return;
@@ -806,7 +928,9 @@ function handleRepair(target, dryRun, opts = {}) {
         state.lastConflictSetKey = conflictKey;
         state.lastConflictTier = 'runtimeContext';
         state.lastConflictPaths = contextConflicts;
+        state.lastActionSummary = `repair stopped: runtime context conflicts ${contextConflicts.join(', ')}`;
         notify(target, state, `runtime-context-conflict:${conflictKey}`, `${target.pr} repair stopped: OpenClaw runtime/bootstrap context paths would enter artifact evidence; refusing: ${contextConflicts.join(', ')}`, true);
+        sendSituationReport(target, state, pr, classification, `situation:runtime-context-conflict:${conflictKey}`);
         saveJson(target.statePath, state);
         return;
       }
@@ -823,10 +947,12 @@ function handleRepair(target, dryRun, opts = {}) {
         state.lastConflictSetKey = conflictKey;
         state.lastConflictTier = conflictInfo.tier;
         state.lastConflictPaths = conflicts.slice().sort();
+        state.lastActionSummary = `repair stopped: ${conflictInfo.tier} conflicts ${conflicts.join(', ') || '(unknown)'}`;
         const pushNote = conflictInfo.tier === 'codeAssisted' && !opts.allowCodeAssistedPush
           ? '; push blocked pending explicit code-assisted approval'
           : '; no automatic resolver available, push not attempted';
         notify(target, state, `repair-conflict:${conflictKey}`, `${target.pr} repair stopped: ${conflictInfo.tier} conflicts ${conflicts.join(', ') || '(unknown)'}${pushNote}; artifact ${basename(artifactPath)}`, true);
+        sendSituationReport(target, state, pr, classification, `situation:repair-conflict:${conflictKey}`);
         saveJson(target.statePath, state);
         return;
       }
@@ -840,6 +966,7 @@ function handleRepair(target, dryRun, opts = {}) {
     run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
     state.autoPushes = [...pushes24h, { at: new Date().toISOString(), from: remoteHead, to: newHead, reason: 'dirty-rebase' }];
+    state.lastActionSummary = `repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`;
     delete state.lastRepairFailureKey;
     delete state.lastConflictSetKey;
     notify(target, state, `repair-success:${remoteHead}:${newHead}`, `${target.pr} repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`, true);
@@ -847,6 +974,7 @@ function handleRepair(target, dryRun, opts = {}) {
     handleCheck(target);
   } catch (err) {
     const state = { ...defaultState(target), ...loadJson(target.statePath, {}) };
+    state.lastActionSummary = `repair failed: ${redact(err.message).slice(0, 300)}`;
     notify(target, state, `repair-error:${String(err.message).slice(0, 160)}`, `${target.pr} repair failed: ${redact(err.message).slice(0, 1200)}`, true);
     saveJson(target.statePath, state);
     throw err;
