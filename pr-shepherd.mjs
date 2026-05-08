@@ -548,21 +548,50 @@ function ghPrViewWithUnknownRecheck(target) {
   return { pr, classification, rechecks };
 }
 
+function checkIdentity(check) {
+  return check.name || check.context || check.workflowName || check.__typename || 'unknown-check';
+}
+
+function isBenignCompletedConclusion(conclusion) {
+  const normalizedConclusion = String(conclusion || '').toUpperCase();
+  return !normalizedConclusion || ['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(normalizedConclusion);
+}
+
 export function classifyChecks(statusCheckRollup = []) {
   const failed = [];
   const pending = [];
+  const ignored = [];
+  const groups = new Map();
   for (const c of statusCheckRollup || []) {
-    const name = c.name || c.context || c.workflowName || c.__typename || 'unknown-check';
-    const conclusion = c.conclusion || '';
-    const status = c.status || '';
-    const detailsUrl = c.detailsUrl || c.targetUrl || c.url || null;
-    const normalizedConclusion = String(conclusion).toUpperCase();
-    const normalizedStatus = String(status).toUpperCase();
-    if (normalizedStatus && normalizedStatus !== 'COMPLETED') pending.push({ name, status, conclusion, detailsUrl });
-    else if (!normalizedConclusion || ['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(normalizedConclusion)) continue;
-    else failed.push({ name, status, conclusion, detailsUrl });
+    const name = checkIdentity(c);
+    const entry = {
+      name,
+      status: c.status || '',
+      conclusion: c.conclusion || '',
+      detailsUrl: c.detailsUrl || c.targetUrl || c.url || null,
+    };
+    const group = groups.get(name) || [];
+    group.push(entry);
+    groups.set(name, group);
   }
-  return { failed, pending };
+
+  for (const group of groups.values()) {
+    const pendingEntries = group.filter((check) => String(check.status || '').toUpperCase() && String(check.status || '').toUpperCase() !== 'COMPLETED');
+    if (pendingEntries.length > 0) {
+      pending.push(...pendingEntries);
+      ignored.push(...group.filter((check) => String(check.status || '').toUpperCase() === 'COMPLETED' && !isBenignCompletedConclusion(check.conclusion)));
+      continue;
+    }
+
+    const hasPassingTerminal = group.some((check) => isBenignCompletedConclusion(check.conclusion));
+    if (hasPassingTerminal) {
+      ignored.push(...group.filter((check) => !isBenignCompletedConclusion(check.conclusion)));
+      continue;
+    }
+
+    failed.push(...group);
+  }
+  return { failed, pending, ignored };
 }
 
 export function classifyPr(pr) {
