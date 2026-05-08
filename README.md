@@ -19,6 +19,7 @@ node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-r
 node pr-shepherd.mjs repair --config config.json --all --dry-run
 node pr-shepherd.mjs repair --config config.json
 node pr-shepherd.mjs repair --config config.json --artifact-dir ./artifacts --no-keep-failed-rebase-worktree
+npm run proof:sandbox
 ```
 
 For backward compatibility, omitting both `--target` and `--all` runs the first configured target.
@@ -46,7 +47,9 @@ or all-target.
 
 PR Shepherd separates automatic observation from operator-approved mutation. Routine automation should
 run only read-only commands from a scheduler, while every command that can touch a worktree or branch is
-kept as an explicit, logged, one-shot operator action.
+kept as an explicit, logged, one-shot operator action. Before promoting repair mechanics, use the
+[sandbox repair proof operating procedure](examples/sandbox-repair-proof.md) for the disposable proof
+sequence and go/no-go criteria.
 
 Automatic scheduler lanes:
 
@@ -111,6 +114,16 @@ out of branch diffs and evidence. Fail closed before PR creation if any of these
 would be committed or attached: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
 `IDENTITY.md`, or `.openclaw/**`. PR Shepherd applies the same guard before writing conflict
 artifact evidence or pushing a repaired branch.
+
+## Sandbox repair proof harness
+
+Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
+bare remotes and a worktree, fakes `gh pr view` with a dirty sandbox PR state, runs `rehearse`, then runs the gated
+live `repair` path only against the local sandbox branch. It proves the deterministic `CHANGELOG.md` autoSafe
+resolver, focused checks, expected remote-head verification, and the existing `--force-with-lease` push path without
+touching `openclaw/openclaw` branches or sending provider notifications. The sanitized proof JSON is written to
+`state/sandbox-proof-artifacts/sandbox-repair-proof.json` by default; override with
+`PR_SHEPHERD_SANDBOX_ARTIFACT_DIR` when collecting evidence outside the repository.
 
 ## Production readiness commands
 

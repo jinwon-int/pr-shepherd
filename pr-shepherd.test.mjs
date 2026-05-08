@@ -79,6 +79,26 @@ test('findOpenClawRuntimeContextPaths reports only root runtime context paths', 
   ]), ['.openclaw/workspace-state.json', 'AGENTS.md', 'TOOLS.md']);
 });
 
+test('sandbox repair proof harness exercises local rebase and force-with-lease repair', () => {
+  const result = spawnSync(process.execPath, [new URL('./examples/sandbox-repair-proof.mjs', import.meta.url).pathname], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: process.env.PATH },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, true);
+  assert.equal(report.schema, 'pr-shepherd-sandbox-repair-proof/v1');
+  assert.equal(report.sandboxOnly, true);
+  assert.equal(report.productionMutation, false);
+  assert.deepEqual(report.commands.map((command) => command.status), [0, 0]);
+  assert.equal(report.forceWithLeaseEvidence.from, report.expectedRemoteHead);
+  assert.equal(report.forceWithLeaseEvidence.to, report.pushedRemoteHead);
+  assert.notEqual(report.expectedRemoteHead, report.pushedRemoteHead);
+  assert.equal(report.focusedChecksPassed, true);
+  assert.deepEqual(report.forbiddenRuntimeContextPaths, []);
+  assert.equal(report.proofPath, 'state/sandbox-proof-artifacts/sandbox-repair-proof.json');
+});
+
 test('validateConfigObject accepts a production-ready target config', () => {
   const report = validateConfigObject({ targets: [validationTarget()] });
   assert.equal(report.ok, true);
