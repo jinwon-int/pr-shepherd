@@ -15,6 +15,7 @@ import {
   classifyPr,
   conflictSetKey,
   executeAutomaticActionPlan,
+  explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   notificationKey,
   planAutomaticAction,
@@ -328,6 +329,11 @@ test('status command reads state files without network access and summarizes the
       lastFailureNames: ['lint'],
       lastPendingCount: 1,
       lastNotificationKey: 'failed:head-a:lint',
+      lastAutomaticActionExecution: {
+        status: 'blocked',
+        actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
+        reasons: ['missing approval'],
+      },
       autoPushes: [{ at: new Date().toISOString(), from: 'old', to: 'new' }],
       actionLedger: [{
         at: '2026-05-08T06:00:00Z',
@@ -352,6 +358,8 @@ test('status command reads state files without network access and summarizes the
     assert.equal(status.lastKind, 'failed');
     assert.deepEqual(status.lastFailureNames, ['lint']);
     assert.equal(status.recentAutoPushCount, 1);
+    assert.equal(status.automaticAction.status, 'blocked');
+    assert.deepEqual(status.automaticAction.reasons, ['missing approval']);
     assert.equal(status.actionLedger.count, 1);
     assert.equal(status.actionLedger.recent[0].approvalId, 'approval-status-1');
     assert.equal(status.actionLedger.recent[0].result, 'failed');
@@ -659,6 +667,8 @@ test('check-canary rechecks transient UNKNOWN mergeability before reporting acti
     assert.equal(summary.mergeable, 'MERGEABLE');
     assert.equal(summary.mergeStateStatus, 'CLEAN');
     assert.equal(summary.rechecks, 1);
+    assert.equal(summary.plannedAction.status, 'planned');
+    assert.equal(summary.plannedAction.actionClass, AUTOMATIC_ACTION_CLASSES.RECHECK);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.lastKind, 'clean');
     assert.equal(state.lastMergeable, 'MERGEABLE');
@@ -690,11 +700,14 @@ test('rehearse is an approval-gated dry-run repair alias that stops before git m
       env: { ...process.env, PATH: fakeBin },
     });
     assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /action planned: repair-rehearsal/);
     assert.match(result.stdout, /dry-run stops before git mutation/);
     assert.equal(existsSync(missingWorktree), false);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.lastKind, 'dirty');
     assert.equal(state.lastMergeStateStatus, 'DIRTY');
+    assert.equal(state.lastAutomaticActionExecution.status, 'planned');
+    assert.equal(state.lastAutomaticActionExecution.actionClass, AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -734,6 +747,7 @@ test('live repair command fails closed before worktree access without live auto-
     assert.equal(existsSync(missingWorktree), false);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.lastAutomaticActionPlan.actionClass, AUTOMATIC_ACTION_CLASSES.BLOCK);
+    assert.equal(state.lastAutomaticActionExecution.status, 'blocked');
     assert.match(state.lastActionSummary, /automatic action blocked/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -830,6 +844,65 @@ test('automatic action planner fails closed for unknown, failed, and ungated dir
   assert.equal(dirtyLive.allowed, false);
   assert.match(dirtyLive.reasons.join('\n'), /liveRepair\.enabled/);
   assert.throws(() => executeAutomaticActionPlan(dirtyLive), /automatic action blocked/);
+});
+
+test('automatic action explanations cover every action class without executing handlers', () => {
+  const expectations = {
+    [AUTOMATIC_ACTION_CLASSES.RECHECK]: { pushAllowed: false, writesArtifact: false },
+    [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: { pushAllowed: false, writesArtifact: false },
+    [AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL]: { pushAllowed: false, writesArtifact: false },
+    [AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT]: { pushAllowed: false, writesArtifact: true },
+    [AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR]: { pushAllowed: true, writesArtifact: false },
+    [AUTOMATIC_ACTION_CLASSES.BLOCK]: { pushAllowed: false, writesArtifact: false, blocked: true },
+  };
+
+  for (const [actionClass, expected] of Object.entries(expectations)) {
+    const plan = {
+      actionClass,
+      allowed: actionClass !== AUTOMATIC_ACTION_CLASSES.BLOCK,
+      pushAllowed: expected.pushAllowed,
+      mutatesBranch: actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+      writesArtifact: expected.writesArtifact,
+      requiresOperatorApproval: actionClass !== AUTOMATIC_ACTION_CLASSES.RECHECK,
+      reasons: [`${actionClass} reason`],
+    };
+    const explanation = explainAutomaticActionPlan(plan);
+    assert.equal(explanation.status, expected.blocked ? 'blocked' : 'planned');
+    assert.equal(explanation.actionClass, actionClass);
+    assert.equal(explanation.pushAllowed, expected.pushAllowed);
+    assert.equal(explanation.writesArtifact, expected.writesArtifact);
+    assert.deepEqual(explanation.reasons, [`${actionClass} reason`]);
+  }
+});
+
+test('automatic action executor reports planned, blocked, executed, and skipped outcomes', () => {
+  const recheckPlan = { actionClass: AUTOMATIC_ACTION_CLASSES.RECHECK, allowed: true, reasons: ['safe refresh'] };
+  const skipped = executeAutomaticActionPlan(recheckPlan);
+  assert.equal(skipped.status, 'skipped');
+  assert.equal(skipped.executed, false);
+  assert.equal(skipped.skipped, true);
+  assert.deepEqual(skipped.reasons, ['safe refresh']);
+
+  const rehearsalPlan = { actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL, allowed: true, reasons: ['dry-run only'] };
+  const planned = executeAutomaticActionPlan(rehearsalPlan, {}, { dryRun: true });
+  assert.equal(planned.status, 'planned');
+  assert.equal(planned.dryRun, true);
+  assert.equal(planned.skipped, true);
+
+  const notifyPlan = { actionClass: AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE, allowed: true, reasons: ['tell operator'] };
+  const executed = executeAutomaticActionPlan(notifyPlan, {
+    [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: (plan) => `handled:${plan.actionClass}`,
+  });
+  assert.equal(executed.status, 'executed');
+  assert.equal(executed.executed, true);
+  assert.equal(executed.result, 'handled:notify-escalate');
+
+  const blockedPlan = { actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK, allowed: false, reasons: ['missing approval'] };
+  assert.throws(() => executeAutomaticActionPlan(blockedPlan), /automatic action blocked: missing approval/);
+  const blocked = executeAutomaticActionPlan(blockedPlan, {}, { throwOnBlocked: false });
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.executed, false);
 });
 
 test('automatic action planner records rehearsal before permitting gated live repair', () => {

@@ -633,6 +633,7 @@ export function buildStatusRows(targets, now = Date.now()) {
       lastPendingCount: state.lastPendingCount || 0,
       recentAutoPushCount: recentAutoPushes(state, now).length,
       lastNotificationKey: state.lastNotificationKey || null,
+      automaticAction: state.lastAutomaticActionExecution || (state.lastAutomaticActionPlan ? explainAutomaticActionPlan(state.lastAutomaticActionPlan) : null),
       actionLedger: summarizeActionLedger(state.actionLedger || []),
       lastRunAt: state.lastRunAt || null,
       lastOkAt: state.lastOkAt || null,
@@ -878,13 +879,46 @@ export function planConflictAutomaticAction(conflictInfo, conflicts = []) {
   });
 }
 
-export function executeAutomaticActionPlan(plan, handlers = {}) {
+export function explainAutomaticActionPlan(plan, fields = {}) {
+  const allowed = Boolean(plan?.allowed);
+  return {
+    status: allowed ? 'planned' : 'blocked',
+    actionClass: plan?.actionClass || AUTOMATIC_ACTION_CLASSES.BLOCK,
+    allowed,
+    pushAllowed: Boolean(plan?.pushAllowed),
+    mutatesBranch: Boolean(plan?.mutatesBranch),
+    writesArtifact: Boolean(plan?.writesArtifact),
+    requiresOperatorApproval: Boolean(plan?.requiresOperatorApproval),
+    reasons: Array.isArray(plan?.reasons) ? plan.reasons.slice() : [],
+    ...fields,
+  };
+}
+
+function automaticActionExecution(plan, status, fields = {}) {
+  return explainAutomaticActionPlan(plan, {
+    status,
+    blocked: status === 'blocked',
+    executed: status === 'executed',
+    skipped: status === 'skipped' || Boolean(fields.dryRun),
+    dryRun: Boolean(fields.dryRun),
+    result: fields.result === undefined ? null : fields.result,
+  });
+}
+
+export function executeAutomaticActionPlan(plan, handlers = {}, opts = {}) {
   if (!plan?.allowed) {
-    throw new Error(`automatic action blocked: ${(plan?.reasons || ['policy denied']).join('; ')}`);
+    const execution = automaticActionExecution(plan, 'blocked');
+    if (opts.throwOnBlocked === false) return execution;
+    const err = new Error(`automatic action blocked: ${(plan?.reasons || ['policy denied']).join('; ')}`);
+    err.execution = execution;
+    throw err;
+  }
+  if (opts.dryRun) {
+    return automaticActionExecution(plan, 'planned', { dryRun: true });
   }
   const handler = handlers[plan.actionClass];
-  if (handler) return { actionClass: plan.actionClass, executed: true, result: handler(plan) };
-  return { actionClass: plan.actionClass, executed: false, result: null };
+  if (!handler) return automaticActionExecution(plan, 'skipped');
+  return automaticActionExecution(plan, 'executed', { result: handler(plan) });
 }
 
 function notificationEnv(target, line, meta = {}) {
@@ -1082,8 +1116,9 @@ function handleCheck(target) {
 
   maybeNotifySituationReport(target, state, pr, classification);
 
+  const plannedAction = explainAutomaticActionPlan(planAutomaticAction(target, state, pr, classification, { dryRun: true, now: Date.now() }));
   saveJson(target.statePath, state);
-  console.log(JSON.stringify({ target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled }, null, 2));
+  console.log(JSON.stringify({ target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled, plannedAction }, null, 2));
   return { target, state, pr, classification };
 }
 
@@ -1310,7 +1345,8 @@ function handleRepair(target, dryRun, opts = {}) {
     const automaticPlan = planAutomaticAction(target, state, pr, classification, { dryRun, now: Date.now() });
     state.lastAutomaticActionPlan = automaticPlan;
     if (dryRun) {
-      executeAutomaticActionPlan(automaticPlan);
+      const execution = executeAutomaticActionPlan(automaticPlan, {}, { dryRun: true });
+      state.lastAutomaticActionExecution = execution;
       const now = new Date();
       state.lastRepairRehearsal = {
         at: now.toISOString(),
@@ -1330,10 +1366,13 @@ function handleRepair(target, dryRun, opts = {}) {
       });
       sendSituationReport(target, state, pr, classification, `situation:dry-run:${preRepairKey}`);
       saveJson(target.statePath, state);
+      console.log(`[pr-shepherd:${target.id}] action ${execution.status}: ${execution.actionClass}; ${execution.reasons.join('; ')}`);
       console.log(`[pr-shepherd:${target.id}] dry-run stops before git mutation`);
       return;
     }
     if (!automaticPlan.allowed) {
+      const execution = executeAutomaticActionPlan(automaticPlan, {}, { throwOnBlocked: false });
+      state.lastAutomaticActionExecution = execution;
       state.lastActionSummary = `live repair blocked: ${automaticPlan.reasons.join('; ')}`;
       appendPlanLedgerEntry(state, target, automaticPlan, 'blocked', {
         repairKey: preRepairKey,
@@ -1345,7 +1384,7 @@ function handleRepair(target, dryRun, opts = {}) {
       saveJson(target.statePath, state);
       executeAutomaticActionPlan(automaticPlan);
     }
-    executeAutomaticActionPlan(automaticPlan);
+    state.lastAutomaticActionExecution = executeAutomaticActionPlan(automaticPlan);
 
     ensureWorktree(target);
     run('git', ['fetch', 'upstream', target.baseBranch], { cwd: target.worktreePath });
@@ -1355,6 +1394,8 @@ function handleRepair(target, dryRun, opts = {}) {
     const postFetchPlan = planAutomaticAction(target, state, { ...pr, baseRefOid: baseOid }, classification, { dryRun: false, now: Date.now() });
     state.lastAutomaticActionPlan = postFetchPlan;
     if (!postFetchPlan.allowed) {
+      const execution = executeAutomaticActionPlan(postFetchPlan, {}, { throwOnBlocked: false });
+      state.lastAutomaticActionExecution = execution;
       state.lastActionSummary = `live repair blocked after fetch: ${postFetchPlan.reasons.join('; ')}`;
       appendPlanLedgerEntry(state, target, postFetchPlan, 'blocked', {
         repairKey,
@@ -1366,6 +1407,7 @@ function handleRepair(target, dryRun, opts = {}) {
       saveJson(target.statePath, state);
       executeAutomaticActionPlan(postFetchPlan);
     }
+    state.lastAutomaticActionExecution = executeAutomaticActionPlan(postFetchPlan);
     if (state.lastRepairFailureKey === repairKey) {
       notify(target, state, `repeat-failure:${repairKey}`, `${target.pr} repair already failed for this head/base state; human intervention needed`, true);
       saveJson(target.statePath, state);
@@ -1383,6 +1425,7 @@ function handleRepair(target, dryRun, opts = {}) {
       const conflictInfo = classifyConflictSet(conflicts, target);
       const conflictPlan = planConflictAutomaticAction(conflictInfo, conflicts);
       state.lastAutomaticActionPlan = conflictPlan;
+      state.lastAutomaticActionExecution = executeAutomaticActionPlan(conflictPlan, {}, { dryRun: true });
       const conflictKey = conflictSetKey(pr, baseOid, conflicts);
       if (contextConflicts.length > 0) {
         run('git', ['rebase', '--abort'], { cwd: target.worktreePath, allowFailure: true });
@@ -1404,11 +1447,24 @@ function handleRepair(target, dryRun, opts = {}) {
         saveJson(target.statePath, state);
         return;
       }
-      const canResolveAutomatically = conflictPlan.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR && resolveAutoSafeConflicts(target, conflictInfo);
+      const canResolveAutomatically = conflictPlan.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR && executeAutomaticActionPlan(conflictPlan, {
+        [AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR]: () => resolveAutoSafeConflicts(target, conflictInfo),
+      }).result;
+      if (canResolveAutomatically) state.lastAutomaticActionExecution = automaticActionExecution(conflictPlan, 'executed', { result: true });
       if (canResolveAutomatically) {
         run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: target.worktreePath });
       } else {
-        const artifactPath = writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir);
+        const artifactExecution = executeAutomaticActionPlan(conflictPlan, {
+          [AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT]: () => writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir),
+          [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: () => writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir),
+        });
+        let artifactPath = artifactExecution.result;
+        if (!artifactPath) {
+          artifactPath = writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir);
+          state.lastAutomaticActionExecution = automaticActionExecution(conflictPlan, 'skipped', { result: artifactPath });
+        } else {
+          state.lastAutomaticActionExecution = artifactExecution;
+        }
         const keepWorktree = conflictInfo.tier === 'codeAssisted'
           && target.keepFailedRebaseWorktree !== false
           && opts.keepFailedRebaseWorktree !== false;
