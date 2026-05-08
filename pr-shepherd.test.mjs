@@ -369,6 +369,25 @@ test('field deployment Telegram wrapper examples default to check-only no-send',
   assert.match(dryRun.stdout, /dryRun=1/);
   assert.match(dryRun.stdout, /target=openclaw-78261/);
 
+  const liveMissingTarget = spawnSync('sh', [wrapperPath], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PR_SHEPHERD_NOTIFY_DRY_RUN: '0',
+      PR_SHEPHERD_MESSAGE: 'live smoke should fail before delivery without OpenClaw target',
+      PR_SHEPHERD_TARGET: 'openclaw-78261',
+      PR_SHEPHERD_PR: 'openclaw/openclaw#78261',
+      PR_SHEPHERD_KIND: 'situation',
+      PR_SHEPHERD_KEY: 'situation:clean:test',
+    },
+  });
+  assert.equal(liveMissingTarget.status, 2);
+  assert.match(liveMissingTarget.stderr, /PR_SHEPHERD_OPENCLAW_TARGET is required/);
+
+  const wrapper = readFileSync(wrapperPath, 'utf8');
+  assert.match(wrapper, /openclaw.*message send/s);
+  assert.doesNotMatch(wrapper, /api\.telegram\.org|curl -fsS|botToken|TELEGRAM_BOT_TOKEN/);
+
   const fragment = JSON.parse(readFileSync(fragmentPath, 'utf8'));
   assert.equal(fragment.notify.mode, 'openclaw');
   assert.equal(fragment.notify.dryRun, true);
