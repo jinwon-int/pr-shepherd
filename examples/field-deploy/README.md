@@ -18,6 +18,9 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   the observed canary lane.
 - `live-readiness-go-no-go.md` — final operator checklist for deciding GO/NO-GO before
   enabling the live check-only reporting lane.
+- `phase-a-standing-ops.md` — standing operations package for the scheduled check-only Phase A lane,
+  including dry-run/no-send scheduling, state/evidence rotation, 24-48h observation, and one-shot live
+  reporting canary boundaries.
 
 ## Safe install sketch
 
