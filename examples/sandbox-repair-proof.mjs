@@ -163,10 +163,17 @@ async function main() {
     config.targets[0].automaticActions.liveRepair = {
       ...config.targets[0].automaticActions.liveRepair,
       targetId: activationTemplate.targetId,
+      owner: activationTemplate.owner,
+      repo: activationTemplate.repo,
+      number: activationTemplate.number,
       pr: activationTemplate.pr,
+      headOwner: activationTemplate.headOwner,
+      actionClass: activationTemplate.actionClass,
       headRefOid: activationTemplate.headRefOid,
       baseRefOid: activationTemplate.baseRefOid,
       repairKey: activationTemplate.repairKey,
+      phaseDPacketExpiresAt: activationTemplate.phaseDPacketExpiresAt,
+      strictVerifyRequired: activationTemplate.strictVerifyRequired,
       rollbackNote: activationTemplate.rollbackNote,
     };
     await writeJson(configPath, config);

@@ -20,10 +20,14 @@ import {
   executeAutomaticActionPlan,
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
+  buildFleetOperatorBrief,
+  buildVerifyGate,
+  liveRepairApprovalState,
   multiTargetLiveRepairGateFailures,
   notificationKey,
   planAutomaticAction,
   planConflictAutomaticAction,
+  PR_FIELDS,
   resolveChangelogConflict,
   selectTargets,
   summarizeActionLedger,
@@ -54,6 +58,7 @@ function validationTarget(overrides = {}) {
     statePath: '/tmp/pr-shepherd/state-1.json',
     lockPath: '/tmp/pr-shepherd/lock-1.lock',
     autoPushLimit24h: 5,
+    focusedChecks: ['npm test'],
     conflictPolicy: {
       autoSafe: [{ path: 'CHANGELOG.md', resolver: 'merge-changelog-top-entry', needle: 'Release note' }],
       codeAssisted: ['src/example.ts'],
@@ -86,6 +91,19 @@ test('findOpenClawRuntimeContextPaths reports only root runtime context paths', 
     'src/HEARTBEAT.md',
     'TOOLS.md',
   ]), ['.openclaw/workspace-state.json', 'AGENTS.md', 'TOOLS.md']);
+});
+
+test('GitHub CLI PR field list excludes unsupported baseRefOid fetch field', () => {
+  assert.equal(PR_FIELDS.includes('baseRefOid'), false);
+  assert.deepEqual(PR_FIELDS, [...new Set(PR_FIELDS)]);
+});
+
+test('strict verify gate defaults to required and detects missing focused checks', () => {
+  assert.equal(buildVerifyGate(validationTarget()).status, 'present');
+  const missing = buildVerifyGate(validationTarget({ focusedChecks: [] }));
+  assert.equal(missing.required, true);
+  assert.equal(missing.status, 'missing');
+  assert.match(missing.reason, /strictVerifyRequired/);
 });
 
 test('sandbox repair proof harness exercises local rebase and force-with-lease repair', () => {
@@ -487,6 +505,22 @@ console.log(JSON.stringify(prs[Math.min(count, prs.length - 1)]));
   chmodSync(ghPath, 0o755);
   return countPath;
 }
+
+test('fleet operator brief summarizes tiers and incidents without live sends', () => {
+  const rows = [
+    { target: 'a', targetTier: 'check-only', lastKind: 'clean', doctorWarnings: [] },
+    { target: 'b', targetTier: 'phase-d-ready', lastKind: 'dirty', incident: { severity: 'block' }, doctorWarnings: ['blocked'] },
+    { target: 'c', targetTier: 'live-approved-once', lastKind: 'unknown', doctorWarnings: [] },
+  ];
+  const brief = buildFleetOperatorBrief(rows);
+  assert.equal(brief.targets, 3);
+  assert.equal(brief.tiers['check-only'], 1);
+  assert.equal(brief.approvalReadyCount, 1);
+  assert.equal(brief.liveApprovedOnceCount, 1);
+  assert.equal(brief.blockedCount, 1);
+  assert.deepEqual(brief.affectedTargets, ['b']);
+  assert.equal(brief.liveSendsDefault, 'disabled-or-dry-run');
+});
 
 test('check --all emits one mixed-target summary and keeps per-target state isolated', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-check-all-'));
@@ -962,6 +996,121 @@ test('rehearse rejects push approval flags', () => {
   assert.match(result.stderr, /--allow-code-assisted-push is not allowed/);
 });
 
+test('strict verify gate blocks live repair before worktree access when focused checks are missing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-live-verify-block-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGh(fakeBin, { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    writeFileSync(statePath, JSON.stringify({
+      lastRepairRehearsal: {
+        at: '2026-05-08T05:00:00.000Z',
+        target: 'target-1',
+        repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+        headRefOid: 'abc123',
+        baseOid: 'base-a',
+        approvalPackage: { schema: 'pr-shepherd-repair-rehearsal-approval/v1', expectedRefs: { headRefOid: 'abc123', baseRefOid: 'base-a', repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY' }, abortCriteria: ['abort'], rollbackNote: 'rollback', evidenceBundle: { evidenceExpiresAt: '2099-05-08T06:00:00Z' } },
+      },
+      actionLedger: [{ actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL, result: 'rehearsed', repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY' }],
+    }));
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        focusedChecks: [],
+        notify: { mode: 'none' },
+        automaticActions: { liveRepair: {
+          enabled: true,
+          scope: 'auto-safe-repair',
+          approvalId: 'approval-verify-1',
+          approvedAt: '2026-05-08T05:00:00Z',
+          expiresAt: '2099-05-08T06:00:00Z',
+          approvedBy: 'operator',
+          branchAllowlist: ['feature'],
+          targetId: 'target-1',
+          owner: 'owner',
+          repo: 'repo',
+          number: 1,
+          pr: 'owner/repo#1',
+          actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+          headRefOid: 'abc123',
+          baseRefOid: 'base-a',
+          repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+          phaseDPacketExpiresAt: '2099-05-08T06:00:00Z',
+          rollbackNote: 'disable live repair after the one-shot run',
+        } },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'repair', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /strictVerifyRequired/);
+    assert.equal(existsSync(missingWorktree), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('clean target with live approval produces no-op audit and consumes approval without worktree mutation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-clean-approval-noop-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGh(fakeBin, { ...base, baseRefOid: 'base-a', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'none' },
+        automaticActions: { liveRepair: {
+          enabled: true,
+          scope: 'auto-safe-repair',
+          approvalId: 'approval-clean-1',
+          approvedAt: '2026-05-08T05:00:00Z',
+          expiresAt: '2099-05-08T06:00:00Z',
+          approvedBy: 'operator',
+          branchAllowlist: ['feature'],
+          targetId: 'target-1',
+          owner: 'owner',
+          repo: 'repo',
+          number: 1,
+          pr: 'owner/repo#1',
+          actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+          headRefOid: 'abc123',
+          baseRefOid: 'base-a',
+          repairKey: 'repair:abc123:base-a:MERGEABLE:CLEAN',
+          phaseDPacketExpiresAt: '2099-05-08T06:00:00Z',
+          rollbackNote: 'disable live repair after the one-shot run',
+        } },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'repair', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(missingWorktree), false);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.lastPostActionAudit.outcome, 'no-op');
+    assert.equal(state.lastPostActionAudit.approvalPresent, true);
+    assert.equal(state.lastPostActionAudit.blockReason, 'target-clean');
+    assert.equal(state.lastPostActionAudit.mutatesBranch, false);
+    assert.equal(liveRepairApprovalState(validationTarget({ automaticActions: { liveRepair: { approvalId: 'approval-clean-1', expiresAt: '2099-05-08T06:00:00Z' } } }), state).state, 'consumed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('live repair command fails closed before worktree access without live auto-action config', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-live-policy-block-'));
   try {
@@ -1090,6 +1239,7 @@ test('automatic action planner fails closed for unknown, failed, and ungated dir
 test('automatic action explanations cover every action class without executing handlers', () => {
   const expectations = {
     [AUTOMATIC_ACTION_CLASSES.RECHECK]: { pushAllowed: false, writesArtifact: false },
+    [AUTOMATIC_ACTION_CLASSES.DIAGNOSE]: { pushAllowed: false, writesArtifact: false },
     [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: { pushAllowed: false, writesArtifact: false },
     [AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL]: { pushAllowed: false, writesArtifact: false },
     [AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT]: { pushAllowed: false, writesArtifact: true },
@@ -1161,7 +1311,12 @@ test('automatic action planner records rehearsal before permitting gated live re
         branchAllowlist: ['feature'],
         rehearsalMaxAgeMs: 10000,
         targetId: 'target-1',
+        owner: 'owner',
+        repo: 'repo',
+        number: 1,
         pr: 'owner/repo#1',
+        headOwner: 'contributor',
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
         headRefOid: 'abc123',
         baseRefOid: 'base-a',
         repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
@@ -1207,6 +1362,43 @@ test('automatic action planner records rehearsal before permitting gated live re
   assert.equal(live.mutatesBranch, true);
 });
 
+test('live approval is target-scoped and rejects reuse across another target or changed head', () => {
+  const target = validationTarget({
+    id: 'target-b',
+    number: 2,
+    pr: 'owner/repo#2',
+    headOwner: 'contributor',
+    automaticActions: { liveRepair: {
+      enabled: true,
+      scope: 'auto-safe-repair',
+      approvalId: 'approval-target-a',
+      approvedAt: '2026-05-08T05:00:00Z',
+      expiresAt: '2099-05-08T06:00:00Z',
+      approvedBy: 'operator',
+      branchAllowlist: ['feature'],
+      targetId: 'target-a',
+      owner: 'owner',
+      repo: 'repo',
+      number: 1,
+      pr: 'owner/repo#1',
+      actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+      headRefOid: 'abc123',
+      baseRefOid: 'base-a',
+      repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+      requireRecentRehearsal: false,
+      rollbackNote: 'disable live repair after the one-shot run',
+    } },
+  });
+  const pr = { ...base, baseRefOid: 'base-a', headRefOid: 'abc123', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const plan = planAutomaticAction(target, {}, pr, classification, { dryRun: false, now: Date.parse('2026-05-08T05:30:00Z') });
+  assert.equal(plan.allowed, false);
+  assert.match(plan.reasons.join('\n'), /targetId must match selected target target-b/);
+  assert.match(plan.reasons.join('\n'), /number must match selected PR number 2/);
+
+  assert.equal(liveRepairApprovalState(target, {}, { headRefOid: 'changed-head' }, Date.parse('2026-05-08T05:30:00Z')).state, 'invalidated-by-head-change');
+});
+
 test('Phase E execution harness fails closed without explicit one-shot approval', () => {
   const target = validationTarget({ pr: 'owner/repo#1', headOwner: 'contributor', baseOwner: 'owner' });
   const pr = { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
@@ -1243,7 +1435,12 @@ test('Phase E execution harness records readiness, post-action audit shape, and 
         branchAllowlist: ['feature'],
         rehearsalMaxAgeMs: 60 * 60 * 1000,
         targetId: 'target-1',
+        owner: 'owner',
+        repo: 'repo',
+        number: 1,
         pr: 'owner/repo#1',
+        headOwner: 'contributor',
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
         headRefOid: 'abc123',
         baseRefOid: 'base-a',
         repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',

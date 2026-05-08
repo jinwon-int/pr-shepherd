@@ -188,15 +188,31 @@ with status/CI follow-up, terminal ledger marker, rollback/disable note, and evi
 These helpers describe readiness and audit evidence; they do not grant approval or perform production
 branch mutation.
 
-### Phase F fleet-safe controls and limited autonomy policy
+### Phase F fleet-safe controls and limited autonomy guardrails
 
-Phase F is documented as an operations policy rather than a new mutation path. It lets operators scale
-check-only reporting, dry-run evidence, and one-shot repair governance across a small fleet while preserving
-per-target locks, state, notification dedupe, approval expiry, focused checks, push budgets, and the
-runtime/bootstrap contamination guard. The policy defines autonomy tiers from F0 observe-only through F3
-one-shot Phase D/E repair; F4 is explicitly prohibited for standing live repair timers, aggregate live
-`repair --all`, unattended force-pushes, or automatic expansion from one target to a fleet. Every
-branch-mutating repair still starts from a fresh Phase D/E record for one target and exact argv.
+Phase F keeps automation broad for observation and narrow for mutation. It lets operators scale check-only
+reporting, dry-run evidence, and one-shot repair governance across a small fleet while preserving per-target locks,
+state, notification dedupe, approval expiry, focused checks, push budgets, and the runtime/bootstrap contamination
+guard. Status/check summaries expose a fleet operator brief with target tiers (`check-only`, `rehearsal-ready`,
+`phase-d-ready`, `live-approved-once`), warning/block counts, affected targets, and dry-run/default-no-live-send
+posture.
+
+Live repair approvals are target-scoped to owner/repo, PR number, target id, branch, expected head/base, action
+class, and expiry; consumed, expired, or head-invalidated approvals fail closed. The strict verify gate is required
+by default for live repair: a target must define at least one focused check before any branch mutation path can
+proceed, and operator approval cannot override a missing verify gate. If an approval is present but the current PR is
+clean, pending, failed, unknown, merged, or disabled, Shepherd records a no-op/block audit, consumes or invalidates
+the one-shot approval, and stops before worktree access. Repeated blocks/unknowns or failed checks produce concise
+incident summaries with affected targets, operator action, and safe rollback/disable notes; status/check remains
+available for visibility.
+
+The limited autonomy lane is therefore: check/status and diagnosis are non-mutating, artifacts/rehearsal prepare
+evidence only, and the only push lane remains `auto-safe-repair` with an unexpired one-shot approval, fresh Phase D/E
+record for one target and exact argv, strict verification, contamination guard, push budget, and exact
+`--force-with-lease` expected head. F4 is explicitly prohibited for standing live repair timers, aggregate live
+`repair --all`, unattended force-pushes, or automatic expansion from one target to a fleet. `gh pr view --json` fetch
+fields intentionally exclude unsupported fields such as `baseRefOid`; base OIDs stay internal state/evidence values
+only.
 
 ## Sandbox repair proof harness
 
