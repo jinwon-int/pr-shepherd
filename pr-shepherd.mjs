@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const PR_FIELDS = [
-  'number', 'state', 'mergeable', 'mergeStateStatus', 'mergedAt', 'headRefOid', 'baseRefOid',
+  'number', 'state', 'mergeable', 'mergeStateStatus', 'mergedAt', 'headRefOid',
   'headRefName', 'baseRefName', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
 ];
 
