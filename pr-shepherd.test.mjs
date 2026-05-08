@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -158,6 +158,13 @@ test('status command reads state files without network access', () => {
   }
 });
 
+function writeFakeGh(binDir, pr) {
+  mkdirSync(binDir, { recursive: true });
+  const ghPath = join(binDir, 'gh');
+  writeFileSync(ghPath, `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(pr))});\n`);
+  chmodSync(ghPath, 0o755);
+}
+
 test('canary command exercises command notifier hook without GitHub or state mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-canary-'));
   try {
@@ -205,6 +212,79 @@ test('canary command exercises command notifier hook without GitHub or state mut
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('check-canary is explicit check-only monitoring and does not require a worktree', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-check-canary-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGh(fakeBin, base);
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'none' },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check-canary', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(missingWorktree), false);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.kind, 'clean');
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.lastKind, 'clean');
+    assert.equal(state.lastSeenHeadOid, 'abc123');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rehearse is an approval-gated dry-run repair alias that stops before git mutation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-rehearse-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGh(fakeBin, { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'none' },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'rehearse', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /dry-run stops before git mutation/);
+    assert.equal(existsSync(missingWorktree), false);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.lastKind, 'dirty');
+    assert.equal(state.lastMergeStateStatus, 'DIRTY');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rehearse rejects push approval flags', () => {
+  const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'rehearse', '--config', 'config.json', '--allow-code-assisted-push'], {
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--allow-code-assisted-push is not allowed/);
 });
 
 test('classifies clean PR', () => {

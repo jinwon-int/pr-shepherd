@@ -12,6 +12,8 @@ node pr-shepherd.mjs canary --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs check --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json --all
+node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
+node pr-shepherd.mjs rehearse --config config.json --target openclaw-78261
 node pr-shepherd.mjs repair --config config.json --dry-run
 node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-run
 node pr-shepherd.mjs repair --config config.json --all --dry-run
@@ -43,10 +45,12 @@ or all-target.
 ## Code-assisted operations and approval gates
 
 PR Shepherd is intended to assist a human operator, not to make broad autonomous code changes.
-Use `check` for read-only classification and notification, and use `repair --dry-run` to confirm a
-candidate repair path before allowing any git mutation. A live `repair` run is the approval boundary:
-start it only after the operator has confirmed the target PR, prepared worktree, remotes, and write
-permissions are correct.
+Use `check` for read-only classification and notification. Use `check-canary` when installing the
+first production monitor so logs clearly show the check-only canary lane; it is an explicit alias for
+the same read-only check path and does not touch the watched worktree. Use `rehearse` (or
+`repair --dry-run`) to confirm a candidate repair path before allowing any git mutation. A live
+`repair` run is the approval boundary: start it only after the operator has confirmed the target PR,
+prepared worktree, remotes, and write permissions are correct.
 
 A live repair still fails closed unless every gate below passes:
 
@@ -85,8 +89,8 @@ Safe check-only rollout:
 2. Prepare `config.json`; keep tokens in auth tooling or environment, not in config.
 3. Run `node pr-shepherd.mjs validate --config config.json`.
 4. Run `node pr-shepherd.mjs check --config config.json --all`.
-5. Run `node pr-shepherd.mjs repair --config config.json --all --dry-run`.
-6. Install only a check timer first, e.g. `check --config <repo>/config.json --all`.
+5. Rehearse repair without git mutation: `node pr-shepherd.mjs rehearse --config config.json --all`.
+6. Install only a check timer first, e.g. `check-canary --config <repo>/config.json --target <id>`.
 7. Observe `status --all`, stdout/command notifications, and state files.
 8. Enable live `repair --target <id>` only later, one target at a time, after explicit operator approval.
 
@@ -198,16 +202,16 @@ worktree, rebase, write conflict artifacts, or push branches.
 
 For a canary rollout, enable check-only automation for one low-risk target before installing aggregate
 timers or allowing any repair workflow. The canary should use the same config shape, notifier, lock,
-and state paths planned for production, but it should run only `check --target <id>` with read-only
-GitHub credentials. Treat a quiet canary as validation of monitoring and notification plumbing only;
-it is not approval to run `repair`.
+and state paths planned for production, but it should run only `check-canary --target <id>` (or the
+older equivalent `check --target <id>`) with read-only GitHub credentials. Treat a quiet canary as
+validation of monitoring and notification plumbing only; it is not approval to run `repair`.
 
 Canary checklist:
 
 1. Pick one target id and confirm its `statePath` and `lockPath` are unique and writable.
 2. Run `validate`, then one manual `check --target <id>` and inspect the JSON summary plus notifier output.
 3. Install `pr-shepherd@<id>.timer` using the example unit, or an equivalent scheduler whose command is
-   exactly `check --config <repo>/config.json --target <id>`.
+   exactly `check-canary --config <repo>/config.json --target <id>`.
 4. Observe at least two timer intervals with no duplicate notifications, lock contention, or state errors.
 5. Only after the canary is stable, add more check-only targets or an aggregate `--all` checker. Keep live
    `repair` disabled until a separate explicit operator approval.
@@ -215,8 +219,8 @@ Canary checklist:
 Recommended check-only pattern:
 
 ```bash
-node pr-shepherd.mjs check --config config.json --target openclaw-78261
-# or, for an aggregate monitor:
+node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
+# or, for an aggregate monitor after the canary is stable:
 node pr-shepherd.mjs check --config config.json --all
 ```
 
@@ -257,6 +261,8 @@ Set `notify.mode=none` to keep only the final JSON status output.
 
 Before enabling a hook in a timer, run `canary --config config.json --target <id>` to exercise the
 configured notifier without contacting GitHub, writing state, touching a worktree, or mutating a branch.
+Then run `check-canary --config config.json --target <id>` once manually to exercise the real read-only
+GitHub/state/notification path before scheduler installation.
 
 For notifier hooks, set `notify.mode=command` and provide an argv array:
 
