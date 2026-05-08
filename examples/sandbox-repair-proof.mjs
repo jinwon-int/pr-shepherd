@@ -157,6 +157,18 @@ async function main() {
 
     const env = { PATH: `${binDir}:${process.env.PATH || ''}` };
     const rehearse = run(process.execPath, [shepherd, 'rehearse', '--config', configPath, '--target', targetId], { env });
+    const rehearsedState = JSON.parse(await readFile(statePath, 'utf8'));
+    const activationTemplate = rehearsedState.lastRepairRehearsal.approvalPackage.approvalConfigTemplate.automaticActions.liveRepair;
+    config.targets[0].automaticActions.liveRepair = {
+      ...config.targets[0].automaticActions.liveRepair,
+      targetId: activationTemplate.targetId,
+      pr: activationTemplate.pr,
+      headRefOid: activationTemplate.headRefOid,
+      baseRefOid: activationTemplate.baseRefOid,
+      repairKey: activationTemplate.repairKey,
+      rollbackNote: activationTemplate.rollbackNote,
+    };
+    await writeJson(configPath, config);
     const expectedRemoteHead = git(['--git-dir', origin, 'rev-parse', `refs/heads/${headBranch}`], root).stdout.trim();
     const repair = run(process.execPath, [shepherd, 'repair', '--config', configPath, '--target', targetId], { env });
     const pushedRemoteHead = git(['--git-dir', origin, 'rev-parse', `refs/heads/${headBranch}`], root).stdout.trim();

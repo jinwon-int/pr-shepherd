@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const PR_FIELDS = [
-  'number', 'state', 'mergeable', 'mergeStateStatus', 'mergedAt', 'headRefOid',
+  'number', 'state', 'mergeable', 'mergeStateStatus', 'mergedAt', 'headRefOid', 'baseRefOid',
   'headRefName', 'baseRefName', 'updatedAt', 'statusCheckRollup', 'reviewDecision', 'url'
 ];
 
@@ -953,6 +953,14 @@ function liveRepairPolicy(target = {}) {
   return target.automaticActions?.liveRepair || {};
 }
 
+function targetPrRef(target = {}) {
+  if (target.pr) return target.pr;
+  if (target.owner && target.repo && Number.isInteger(Number(target.number)) && Number(target.number) > 0) {
+    return `${target.owner}/${target.repo}#${Number(target.number)}`;
+  }
+  return null;
+}
+
 function currentBaseOid(state = {}, pr = {}) {
   return pr.baseRefOid || state.lastSeenBaseOid || null;
 }
@@ -1020,6 +1028,12 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
           approvedBy: '<operator>',
           branchAllowlist: headBranch ? [headBranch] : ['<head-branch>'],
           rehearsalMaxAgeMs: DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS,
+          targetId: target.id || '<target-id>',
+          pr: targetPrRef(target) || '<owner/repo#number>',
+          headRefOid: expectedRefs.headRefOid || '<head-ref-oid>',
+          baseRefOid: expectedRefs.baseRefOid || '<base-ref-oid>',
+          repairKey,
+          rollbackNote: 'Remove or set automaticActions.liveRepair.enabled=false after this one-shot repair; rerun status to verify the result.',
         },
       },
     },
@@ -1074,6 +1088,21 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
   if (typeof policy.approvalId !== 'string' || policy.approvalId.trim() === '') failures.push('automaticActions.liveRepair.approvalId is required');
   if (typeof policy.approvedAt !== 'string' || Number.isNaN(Date.parse(policy.approvedAt))) failures.push('automaticActions.liveRepair.approvedAt is missing or invalid');
   if (typeof policy.approvedBy !== 'string' || policy.approvedBy.trim() === '') failures.push('automaticActions.liveRepair.approvedBy is required');
+
+  const expectedTargetId = target.id || null;
+  const expectedPr = targetPrRef(target);
+  if (typeof policy.targetId !== 'string' || policy.targetId.trim() === '') failures.push('automaticActions.liveRepair.targetId is required');
+  else if (expectedTargetId && policy.targetId !== expectedTargetId) failures.push(`automaticActions.liveRepair.targetId must match selected target ${expectedTargetId}`);
+  if (typeof policy.pr !== 'string' || policy.pr.trim() === '') failures.push('automaticActions.liveRepair.pr is required');
+  else if (expectedPr && policy.pr !== expectedPr) failures.push(`automaticActions.liveRepair.pr must match selected PR ${expectedPr}`);
+  if (typeof policy.headRefOid !== 'string' || policy.headRefOid.trim() === '') failures.push('automaticActions.liveRepair.headRefOid is required');
+  else if (pr?.headRefOid && policy.headRefOid !== pr.headRefOid) failures.push('automaticActions.liveRepair.headRefOid does not match current PR head');
+  if (typeof policy.baseRefOid !== 'string' || policy.baseRefOid.trim() === '') failures.push('automaticActions.liveRepair.baseRefOid is required');
+  else if (baseOid && policy.baseRefOid !== baseOid) failures.push('automaticActions.liveRepair.baseRefOid does not match current base');
+  if (typeof policy.repairKey !== 'string' || policy.repairKey.trim() === '') failures.push('automaticActions.liveRepair.repairKey is required');
+  else if (policy.repairKey !== expectedRepairKey) failures.push('automaticActions.liveRepair.repairKey does not match current PR state');
+  if (typeof policy.rollbackNote !== 'string' || policy.rollbackNote.trim() === '') failures.push('automaticActions.liveRepair.rollbackNote is required');
+
   const allowlist = Array.isArray(policy.branchAllowlist) ? policy.branchAllowlist.map((item) => String(item).trim()).filter(Boolean) : [];
   if (!headBranch || !allowlist.includes(headBranch)) failures.push(`head branch ${headBranch || '(unknown)'} is not in automaticActions.liveRepair.branchAllowlist`);
   if (target.headOwner && target.baseOwner && target.headOwner === target.baseOwner && policy.allowMaintainerOwnedBranches !== true) {
@@ -1089,6 +1118,23 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
     if (rehearsal && rehearsal.headRefOid !== pr?.headRefOid) failures.push('repair rehearsal headRefOid does not match');
     if (rehearsal && (rehearsal.baseOid || baseOid) && rehearsal.baseOid !== baseOid) failures.push('repair rehearsal baseRefOid does not match');
     if (rehearsal && rehearsal.repairKey !== expectedRepairKey) failures.push('repair rehearsal key does not match current PR state');
+    if (rehearsal) {
+      const approvalPackage = rehearsal.approvalPackage;
+      if (!isPlainObject(approvalPackage) || approvalPackage.schema !== 'pr-shepherd-repair-rehearsal-approval/v1') failures.push('repair rehearsal approvalPackage is required for Phase D activation');
+      else {
+        const expectedRefs = approvalPackage.expectedRefs || {};
+        if (expectedRefs.headRefOid !== pr?.headRefOid) failures.push('repair rehearsal approvalPackage expected head does not match current PR head');
+        if (expectedRefs.baseRefOid !== baseOid) failures.push('repair rehearsal approvalPackage expected base does not match current base');
+        if (expectedRefs.repairKey !== expectedRepairKey) failures.push('repair rehearsal approvalPackage repairKey does not match current PR state');
+        if (!Array.isArray(approvalPackage.abortCriteria) || approvalPackage.abortCriteria.length === 0) failures.push('repair rehearsal approvalPackage abortCriteria are required');
+        if (typeof approvalPackage.rollbackNote !== 'string' || approvalPackage.rollbackNote.trim() === '') failures.push('repair rehearsal approvalPackage rollbackNote is required');
+      }
+      const ledger = Array.isArray(state.actionLedger) ? state.actionLedger : [];
+      const hasRehearsalLedgerEntry = ledger.some((entry) => entry?.actionClass === AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL
+        && entry?.result === 'rehearsed'
+        && entry?.repairKey === expectedRepairKey);
+      if (!hasRehearsalLedgerEntry) failures.push('actionLedger must include a rehearsed repair entry for the current repairKey');
+    }
   }
   return failures;
 }
