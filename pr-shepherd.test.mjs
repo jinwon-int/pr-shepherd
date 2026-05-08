@@ -244,6 +244,22 @@ function writeFakeGh(binDir, pr) {
   chmodSync(ghPath, 0o755);
 }
 
+function writeFakeGhSequence(binDir, prs) {
+  mkdirSync(binDir, { recursive: true });
+  const ghPath = join(binDir, 'gh');
+  const countPath = join(binDir, 'gh-count.txt');
+  writeFileSync(ghPath, `#!${process.execPath}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const countPath = ${JSON.stringify(countPath)};
+const prs = ${JSON.stringify(prs)};
+const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) : 0;
+writeFileSync(countPath, String(count + 1));
+console.log(JSON.stringify(prs[Math.min(count, prs.length - 1)]));
+`);
+  chmodSync(ghPath, 0o755);
+  return countPath;
+}
+
 test('buildSituationReportLine includes no-action next action for healthy PRs', () => {
   const line = buildSituationReportLine(validationTarget(), {}, base, { kind: 'clean', checks: { failed: [], pending: [] } });
   assert.match(line, /target=target-1/);
@@ -482,6 +498,48 @@ test('check-canary is explicit check-only monitoring and does not require a work
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.lastKind, 'clean');
     assert.equal(state.lastSeenHeadOid, 'abc123');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('check-canary rechecks transient UNKNOWN mergeability before reporting action needed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-check-canary-unknown-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGhSequence(fakeBin, [
+      { ...base, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' },
+      base,
+    ]);
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'none' },
+        unknownRecheckAttempts: 2,
+        unknownRecheckDelayMs: 0,
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check-canary', '--config', configPath, '--target', 'target-1'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(missingWorktree), false);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.kind, 'clean');
+    assert.equal(summary.mergeable, 'MERGEABLE');
+    assert.equal(summary.mergeStateStatus, 'CLEAN');
+    assert.equal(summary.rechecks, 1);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.lastKind, 'clean');
+    assert.equal(state.lastMergeable, 'MERGEABLE');
+    assert.equal(state.lastUnknownRecheckCount, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
