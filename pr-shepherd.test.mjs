@@ -80,6 +80,27 @@ test('validateConfigObject accepts a production-ready target config', () => {
   assert.deepEqual(report.errors, []);
 });
 
+test('validateConfigObject accepts dry-run OpenClaw notify and rejects secret-bearing live OpenClaw config', () => {
+  const dryRunReport = validateConfigObject({
+    targets: [validationTarget({ notify: { mode: 'openclaw' } })],
+  });
+  assert.equal(dryRunReport.ok, true);
+
+  const liveWithoutCommand = validateConfigObject({
+    targets: [validationTarget({ notify: { mode: 'openclaw', dryRun: false } })],
+  });
+  assert.equal(liveWithoutCommand.ok, false);
+  assert.match(liveWithoutCommand.errors.join('\n'), /notify\.command is required/);
+
+  const secretBearing = validateConfigObject({
+    targets: [validationTarget({
+      notify: { mode: 'openclaw', dryRun: false, command: [process.execPath, '-e', ''], chatId: '123456' },
+    })],
+  });
+  assert.equal(secretBearing.ok, false);
+  assert.match(secretBearing.errors.join('\n'), /notify\.chatId must not be stored in config/);
+});
+
 test('validateConfigObject rejects missing required fields, invalid push limits, and secrets', () => {
   const report = validateConfigObject({
     targets: [validationTarget({
@@ -164,6 +185,57 @@ function writeFakeGh(binDir, pr) {
   writeFileSync(ghPath, `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(pr))});\n`);
   chmodSync(ghPath, 0o755);
 }
+
+test('check reports dirty state once through live OpenClaw wrapper without touching worktree', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-openclaw-dirty-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const hookPath = join(dir, 'openclaw-hook.mjs');
+    const hookOutPath = join(dir, 'openclaw-hook-output.jsonl');
+    const missingWorktree = join(dir, 'missing-worktree');
+    writeFakeGh(fakeBin, { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    writeFileSync(hookPath, [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync(process.argv[2], JSON.stringify({",
+      '  message: process.env.PR_SHEPHERD_MESSAGE,',
+      '  target: process.env.PR_SHEPHERD_TARGET,',
+      '  pr: process.env.PR_SHEPHERD_PR,',
+      '  url: process.env.PR_SHEPHERD_URL,',
+      '  kind: process.env.PR_SHEPHERD_KIND,',
+      '  key: process.env.PR_SHEPHERD_KEY,',
+      '  mode: process.env.PR_SHEPHERD_NOTIFY_MODE,',
+      '}) + "\\n");',
+      '',
+    ].join('\n'));
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: missingWorktree,
+        notify: { mode: 'openclaw', dryRun: false, command: [process.execPath, hookPath, hookOutPath] },
+      })],
+    }));
+
+    for (let i = 0; i < 2; i += 1) {
+      const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check', '--config', configPath, '--target', 'target-1'], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: fakeBin },
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    assert.equal(existsSync(missingWorktree), false);
+    const deliveries = readFileSync(hookOutPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(deliveries.length, 1);
+    assert.match(deliveries[0].message, /owner\/repo#1 DIRTY\/CONFLICTING; check-only report/);
+    assert.equal(deliveries[0].kind, 'dirty');
+    assert.equal(deliveries[0].mode, 'openclaw');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('canary command exercises command notifier hook without GitHub or state mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-canary-'));

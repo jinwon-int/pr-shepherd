@@ -253,8 +253,22 @@ export function validateConfigObject(cfg, configPath = null) {
 
     if (target.notify !== undefined) {
       if (!isPlainObject(target.notify)) errors.push(`${targetPath}.notify must be an object`);
-      else if (target.notify.mode !== undefined && !['stdout', 'none', 'command'].includes(target.notify.mode)) errors.push(`${targetPath}.notify.mode must be stdout, none, or command`);
-      else if (target.notify.mode === 'command' && (!Array.isArray(target.notify.command) || target.notify.command.length === 0 || !target.notify.command.every((item) => typeof item === 'string' && item.length > 0))) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+      else {
+        const notifyMode = target.notify.mode;
+        const hasCommand = Array.isArray(target.notify.command)
+          && target.notify.command.length > 0
+          && target.notify.command.every((item) => typeof item === 'string' && item.length > 0);
+        if (notifyMode !== undefined && !['stdout', 'none', 'command', 'openclaw'].includes(notifyMode)) errors.push(`${targetPath}.notify.mode must be stdout, none, command, or openclaw`);
+        if (target.notify.command !== undefined && !hasCommand) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+        if (notifyMode === 'command' && !hasCommand) errors.push(`${targetPath}.notify.command must be a non-empty string array`);
+        if (notifyMode === 'openclaw') {
+          if (target.notify.dryRun !== undefined && typeof target.notify.dryRun !== 'boolean') errors.push(`${targetPath}.notify.dryRun must be a boolean`);
+          if (target.notify.dryRun === false && !hasCommand) errors.push(`${targetPath}.notify.command is required when notify.mode is openclaw and dryRun is false`);
+          for (const forbidden of ['token', 'botToken', 'gatewayToken', 'chatId', 'chatID', 'chat', 'to']) {
+            if (target.notify[forbidden] !== undefined) errors.push(`${targetPath}.notify.${forbidden} must not be stored in config; keep OpenClaw/Telegram routing and credentials in the operator environment`);
+          }
+        }
+      }
     }
   });
 
@@ -464,24 +478,42 @@ export function notificationKey(kind, pr, checks, extra = '') {
   return `${kind}:${pr.headRefOid || ''}:${pr.mergeable || ''}:${pr.mergeStateStatus || ''}:${extra}`;
 }
 
-function deliverNotification(target, line, meta = {}) {
-  if (target.notify?.mode === 'none') return true;
-  if (target.notify?.mode === 'command' && Array.isArray(target.notify.command)) {
-    const [cmd, ...args] = target.notify.command;
-    run(cmd, args, {
-      env: {
-        PR_SHEPHERD_MESSAGE: line,
-        PR_SHEPHERD_TARGET: String(target.id || ''),
-        PR_SHEPHERD_PR: String(target.pr || ''),
-        PR_SHEPHERD_URL: String(target.url || ''),
-        PR_SHEPHERD_KIND: String(meta.kind || ''),
-        PR_SHEPHERD_KEY: String(meta.key || ''),
-      },
-      allowFailure: true,
-    });
-  } else {
-    console.log(line);
+function notificationEnv(target, line, meta = {}) {
+  return {
+    PR_SHEPHERD_MESSAGE: line,
+    PR_SHEPHERD_TARGET: String(target.id || ''),
+    PR_SHEPHERD_PR: String(target.pr || ''),
+    PR_SHEPHERD_URL: String(target.url || ''),
+    PR_SHEPHERD_KIND: String(meta.kind || ''),
+    PR_SHEPHERD_KEY: String(meta.key || ''),
+    PR_SHEPHERD_NOTIFY_MODE: String(target.notify?.mode || 'stdout'),
+  };
+}
+
+function deliverCommandNotification(target, line, meta = {}) {
+  const [cmd, ...args] = target.notify.command;
+  run(cmd, args, {
+    env: notificationEnv(target, line, meta),
+    allowFailure: true,
+  });
+}
+
+function deliverOpenClawNotification(target, line, meta = {}) {
+  const dryRun = target.notify?.dryRun !== false;
+  if (dryRun || !Array.isArray(target.notify?.command)) {
+    console.log(`[pr-shepherd:${target.id}] OpenClaw notify dry-run: ${line}`);
+    return true;
   }
+  deliverCommandNotification(target, line, { ...meta, openclaw: true });
+  return true;
+}
+
+function deliverNotification(target, line, meta = {}) {
+  const mode = target.notify?.mode || 'stdout';
+  if (mode === 'none') return true;
+  if (mode === 'command' && Array.isArray(target.notify.command)) deliverCommandNotification(target, line, meta);
+  else if (mode === 'openclaw') deliverOpenClawNotification(target, line, meta);
+  else console.log(line);
   return true;
 }
 
@@ -489,7 +521,7 @@ function notify(target, state, key, message, force = false) {
   if (!force && state.lastNotificationKey === key) return false;
   state.lastNotificationKey = key;
   const line = `[pr-shepherd:${target.id}] ${message}`;
-  return deliverNotification(target, line, { kind: 'notification', key });
+  return deliverNotification(target, line, { kind: String(key).split(':')[0] || 'notification', key });
 }
 
 export function buildCanaryNotificationLine(target, now = new Date()) {
@@ -539,6 +571,7 @@ function handleCheck(target) {
   if (classification.kind === 'merged') notify(target, state, notificationKey('merged', pr, classification.checks), `${target.pr} merged; disabling future runs`, true);
   else if (classification.kind === 'clean' && previousKind && !['clean', 'disabled'].includes(previousKind)) notify(target, state, notificationKey('clean', pr, classification.checks), `${target.pr} recovered to CLEAN`);
   else if (classification.kind === 'failed') notify(target, state, notificationKey('failed', pr, classification.checks), `${target.pr} CI failed: ${summarizeFailed(classification.checks)}`);
+  else if (classification.kind === 'dirty') notify(target, state, notificationKey('dirty', pr, classification.checks), `${target.pr} DIRTY/CONFLICTING; check-only report, no repair attempted`);
   else if (classification.kind === 'unstable') {
     const pendingSince = state.pendingSince || new Date().toISOString();
     state.pendingSince = pendingSince;

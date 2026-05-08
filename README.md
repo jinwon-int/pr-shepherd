@@ -283,7 +283,7 @@ configured notifier without contacting GitHub, writing state, touching a worktre
 Then run `check-canary --config config.json --target <id>` once manually to exercise the real read-only
 GitHub/state/notification path before scheduler installation.
 
-For notifier hooks, set `notify.mode=command` and provide an argv array:
+For generic notifier hooks, set `notify.mode=command` and provide an argv array:
 
 ```json
 "notify": {
@@ -292,11 +292,34 @@ For notifier hooks, set `notify.mode=command` and provide an argv array:
 }
 ```
 
+For OpenClaw/Telegram operations, prefer the first-class `openclaw` mode. It is a dry run unless
+`dryRun` is explicitly set to `false`; live mode still only executes an operator-owned argv wrapper and
+never stores Telegram bot tokens, Gateway tokens, chat ids, or recipient routing in `config.json`:
+
+```json
+"notify": {
+  "mode": "openclaw",
+  "dryRun": true
+}
+```
+
+When the canary and wrapper are approved by the operator, switch to a live host wrapper that reads all
+credentials and Telegram/OpenClaw routing from the service environment, not this repository:
+
+```json
+"notify": {
+  "mode": "openclaw",
+  "dryRun": false,
+  "command": ["/usr/local/bin/pr-shepherd-openclaw-notify"]
+}
+```
+
 The formatted notification line is passed in the `PR_SHEPHERD_MESSAGE` environment variable. Hooks also
-receive `PR_SHEPHERD_TARGET`, `PR_SHEPHERD_PR`, `PR_SHEPHERD_URL`, `PR_SHEPHERD_KIND`, and
-`PR_SHEPHERD_KEY` for routing/idempotency. The notifier hook receives no stdin from PR Shepherd, and its
-configured argv is executed directly without a shell. Hook failures are allowed so a flaky notifier cannot
-block state updates; use the process logs or your notifier's own telemetry to alert on delivery problems.
+receive `PR_SHEPHERD_TARGET`, `PR_SHEPHERD_PR`, `PR_SHEPHERD_URL`, `PR_SHEPHERD_KIND`,
+`PR_SHEPHERD_KEY`, and `PR_SHEPHERD_NOTIFY_MODE` for routing/idempotency. The notifier hook receives no
+stdin from PR Shepherd, and its configured argv is executed directly without a shell. Hook failures are
+allowed so a flaky notifier cannot block state updates; use the process logs or your notifier's own
+telemetry to alert on delivery problems.
 
 Notifier hook requirements:
 
