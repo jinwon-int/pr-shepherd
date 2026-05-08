@@ -17,6 +17,7 @@ import {
   executeAutomaticActionPlan,
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
+  multiTargetLiveRepairGateFailures,
   notificationKey,
   planAutomaticAction,
   planConflictAutomaticAction,
@@ -270,6 +271,36 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
   assert.match(malformed.errors.join('\n'), /liveRepair\.approvedBy must be a non-empty string/);
 });
 
+const multiTargetApproval = {
+  enabled: true,
+  scope: 'multi-target-auto-safe-repair',
+  approvalId: 'fleet-approval-1',
+  approvedAt: '2026-05-08T06:00:00Z',
+  approvedBy: 'operator',
+  targetIds: ['target-1', 'target-2'],
+};
+
+test('multi-target live repair requires explicit fleet approval naming selected targets', () => {
+  const targets = [validationTarget(), validationTarget({ id: 'target-2', number: 2, statePath: '/tmp/pr-shepherd/state-2.json', lockPath: '/tmp/pr-shepherd/lock-2.lock' })];
+  assert.match(
+    multiTargetLiveRepairGateFailures({ targets }, targets, { cmd: 'repair', dryRun: false }).join('\n'),
+    /multiTargetLiveRepair\.enabled is not true/,
+  );
+  assert.deepEqual(
+    multiTargetLiveRepairGateFailures({ automaticActions: { multiTargetLiveRepair: multiTargetApproval }, targets }, targets, { cmd: 'repair', dryRun: false }),
+    [],
+  );
+  assert.deepEqual(multiTargetLiveRepairGateFailures({ targets }, targets, { cmd: 'repair', dryRun: true }), []);
+
+  const malformed = validateConfigObject({
+    automaticActions: { multiTargetLiveRepair: { enabled: true } },
+    targets: [validationTarget()],
+  });
+  assert.equal(malformed.ok, false);
+  assert.match(malformed.errors.join('\n'), /multiTargetLiveRepair\.scope must be multi-target-auto-safe-repair/);
+  assert.match(malformed.errors.join('\n'), /multiTargetLiveRepair\.targetIds must be a non-empty string array/);
+});
+
 test('action ledger appends once and redacts secrets/private paths', () => {
   const state = {};
   const target = validationTarget({
@@ -390,6 +421,70 @@ console.log(JSON.stringify(prs[Math.min(count, prs.length - 1)]));
   chmodSync(ghPath, 0o755);
   return countPath;
 }
+
+test('check --all emits one mixed-target summary and keeps per-target state isolated', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-check-all-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const configPath = join(dir, 'config.json');
+    const statePath1 = join(dir, 'state-1.json');
+    const statePath2 = join(dir, 'state-2.json');
+    writeFakeGhSequence(fakeBin, [
+      base,
+      { ...base, number: 2, headRefOid: 'def456', statusCheckRollup: [{ name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' }] },
+    ]);
+    writeFileSync(configPath, JSON.stringify({
+      targets: [
+        validationTarget({ statePath: statePath1, lockPath: join(dir, 'lock-1'), worktreePath: join(dir, 'missing-worktree-1'), notify: { mode: 'none' } }),
+        validationTarget({ id: 'target-2', number: 2, statePath: statePath2, lockPath: join(dir, 'lock-2'), worktreePath: join(dir, 'missing-worktree-2'), notify: { mode: 'none' } }),
+      ],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check', '--config', configPath, '--all'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: fakeBin },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.command, 'check');
+    assert.deepEqual(summary.targets.map((target) => [target.target, target.ok, target.kind]), [
+      ['target-1', true, 'clean'],
+      ['target-2', true, 'failed'],
+    ]);
+    assert.equal(JSON.parse(readFileSync(statePath1, 'utf8')).lastSeenHeadOid, 'abc123');
+    assert.equal(JSON.parse(readFileSync(statePath2, 'utf8')).lastSeenHeadOid, 'def456');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('repair --all without fleet approval fails closed before GitHub or worktree access', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-repair-all-block-'));
+  try {
+    const configPath = join(dir, 'config.json');
+    const statePath1 = join(dir, 'state-1.json');
+    const statePath2 = join(dir, 'state-2.json');
+    writeFileSync(configPath, JSON.stringify({
+      targets: [
+        validationTarget({ statePath: statePath1, lockPath: join(dir, 'lock-1'), worktreePath: join(dir, 'missing-worktree-1'), notify: { mode: 'none' } }),
+        validationTarget({ id: 'target-2', number: 2, statePath: statePath2, lockPath: join(dir, 'lock-2'), worktreePath: join(dir, 'missing-worktree-2'), notify: { mode: 'none' } }),
+      ],
+    }));
+
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'repair', '--config', configPath, '--all'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: '/nonexistent-gh' },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /multi-target live repair blocked/);
+    assert.equal(existsSync(statePath1), false);
+    assert.equal(existsSync(statePath2), false);
+    assert.equal(existsSync(join(dir, 'missing-worktree-1')), false);
+    assert.equal(existsSync(join(dir, 'missing-worktree-2')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('buildSituationReportLine includes no-action next action for healthy PRs', () => {
   const line = buildSituationReportLine(validationTarget(), {}, base, { kind: 'clean', checks: { failed: [], pending: [] } });

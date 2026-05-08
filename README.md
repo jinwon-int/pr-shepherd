@@ -132,10 +132,12 @@ push budgets are notification-only outcomes that require human intervention.
 Automatic action planning is explicit and fail-closed. `check`/`check-canary` may refresh state and notify,
 `rehearse`/`repair --dry-run` records recent rehearsal evidence without branch mutation, and conflict handling
 plans either deterministic `autoSafe` repair or artifact/escalation. Live branch mutation is blocked unless
-`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`, `approvedAt`,
-`approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
+target-level `automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`,
+`approvedAt`, `approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
 and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
-that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`.
+that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`. Live `repair` against multiple
+selected targets is blocked before GitHub/worktree access unless config-level `automaticActions.multiTargetLiveRepair`
+is enabled with `scope="multi-target-auto-safe-repair"`, approval metadata, and `targetIds` naming every selected target.
 
 ### Action-class executor operating procedure
 

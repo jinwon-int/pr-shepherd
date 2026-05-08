@@ -272,6 +272,33 @@ function validateAutomaticActions(errors, target, targetPath) {
   if (liveRepair.allowMaintainerOwnedBranches !== undefined && typeof liveRepair.allowMaintainerOwnedBranches !== 'boolean') errors.push(`${livePath}.allowMaintainerOwnedBranches must be a boolean`);
 }
 
+function validateMultiTargetLiveRepair(errors, cfg) {
+  const approval = cfg?.automaticActions?.multiTargetLiveRepair;
+  if (approval === undefined) return;
+  const approvalPath = 'config.automaticActions.multiTargetLiveRepair';
+  if (!isPlainObject(approval)) {
+    errors.push(`${approvalPath} must be an object`);
+    return;
+  }
+  if (approval.enabled !== undefined && typeof approval.enabled !== 'boolean') errors.push(`${approvalPath}.enabled must be a boolean`);
+  if (approval.scope !== undefined && approval.scope !== 'multi-target-auto-safe-repair') errors.push(`${approvalPath}.scope must be multi-target-auto-safe-repair`);
+  if (approval.enabled === true) {
+    if (approval.scope !== 'multi-target-auto-safe-repair') errors.push(`${approvalPath}.scope must be multi-target-auto-safe-repair when enabled`);
+    if (typeof approval.approvalId !== 'string' || approval.approvalId.trim() === '') errors.push(`${approvalPath}.approvalId is required when enabled`);
+    if (typeof approval.approvedAt !== 'string' || Number.isNaN(Date.parse(approval.approvedAt))) errors.push(`${approvalPath}.approvedAt must be an ISO-8601 timestamp when enabled`);
+    if (typeof approval.approvedBy !== 'string' || approval.approvedBy.trim() === '') errors.push(`${approvalPath}.approvedBy is required when enabled`);
+    if (!Array.isArray(approval.targetIds) || approval.targetIds.map((item) => String(item).trim()).filter(Boolean).length === 0) {
+      errors.push(`${approvalPath}.targetIds must be a non-empty string array when enabled`);
+    }
+  }
+  if (approval.approvalId !== undefined && (typeof approval.approvalId !== 'string' || approval.approvalId.trim() === '')) errors.push(`${approvalPath}.approvalId must be a non-empty string`);
+  if (approval.approvedAt !== undefined && (typeof approval.approvedAt !== 'string' || Number.isNaN(Date.parse(approval.approvedAt)))) errors.push(`${approvalPath}.approvedAt must be an ISO-8601 timestamp`);
+  if (approval.approvedBy !== undefined && (typeof approval.approvedBy !== 'string' || approval.approvedBy.trim() === '')) errors.push(`${approvalPath}.approvedBy must be a non-empty string`);
+  if (approval.targetIds !== undefined && (!Array.isArray(approval.targetIds) || approval.targetIds.some((item) => typeof item !== 'string' || item.trim() === ''))) {
+    errors.push(`${approvalPath}.targetIds must be a string array`);
+  }
+}
+
 export function validateConfigObject(cfg, configPath = null) {
   const errors = [];
   const warnings = [];
@@ -280,6 +307,7 @@ export function validateConfigObject(cfg, configPath = null) {
     errors.push('config must contain non-empty targets[]');
     return { ok: false, errors, warnings };
   }
+  validateMultiTargetLiveRepair(errors, cfg);
 
   const ids = new Map();
   const enabledStatePaths = new Map();
@@ -611,6 +639,28 @@ export function selectTargets(cfg, selectors = [], allTargets = false) {
     if (!selected.some((target) => target.id === matches[0].id)) selected.push(matches[0]);
   }
   return selected;
+}
+
+export function multiTargetLiveRepairGateFailures(cfg, targets, args = {}) {
+  if (args.cmd !== 'repair' || args.dryRun || targets.length <= 1) return [];
+  const approval = cfg?.automaticActions?.multiTargetLiveRepair || {};
+  const failures = [];
+  if (approval.enabled !== true) failures.push('config.automaticActions.multiTargetLiveRepair.enabled is not true');
+  if (approval.scope !== 'multi-target-auto-safe-repair') failures.push('config.automaticActions.multiTargetLiveRepair.scope must be multi-target-auto-safe-repair');
+  if (typeof approval.approvalId !== 'string' || approval.approvalId.trim() === '') failures.push('config.automaticActions.multiTargetLiveRepair.approvalId is required');
+  if (typeof approval.approvedAt !== 'string' || Number.isNaN(Date.parse(approval.approvedAt))) failures.push('config.automaticActions.multiTargetLiveRepair.approvedAt is missing or invalid');
+  if (typeof approval.approvedBy !== 'string' || approval.approvedBy.trim() === '') failures.push('config.automaticActions.multiTargetLiveRepair.approvedBy is required');
+  const approvedTargetIds = new Set(Array.isArray(approval.targetIds) ? approval.targetIds.map((item) => String(item).trim()).filter(Boolean) : []);
+  const missingTargetIds = targets.map((target) => target.id).filter((id) => !approvedTargetIds.has(id));
+  if (missingTargetIds.length > 0) failures.push(`config.automaticActions.multiTargetLiveRepair.targetIds missing selected target(s): ${missingTargetIds.join(', ')}`);
+  return failures;
+}
+
+function assertMultiTargetLiveRepairAllowed(cfg, targets, args) {
+  const failures = multiTargetLiveRepairGateFailures(cfg, targets, args);
+  if (failures.length > 0) {
+    throw new Error(`multi-target live repair blocked: ${failures.join('; ')}`);
+  }
 }
 
 export function buildStatusRows(targets, now = Date.now()) {
@@ -1083,14 +1133,15 @@ function maybeNotifySituationReport(target, state, pr, classification, now = new
   return sendSituationReport(target, state, pr, classification, key, now);
 }
 
-function handleCheck(target) {
+function handleCheck(target, opts = {}) {
   const state = { ...defaultState(target), ...loadJson(target.statePath, {}) };
   if (state.disabled) {
     const classification = { kind: 'disabled', checks: { failed: [], pending: [] } };
     maybeNotifySituationReport(target, state, null, classification);
     saveJson(target.statePath, state);
-    console.log(`[pr-shepherd:${target.id}] disabled`);
-    return { target, state, pr: null, classification };
+    const summary = { target: target.id, kind: 'disabled', disabled: true, plannedAction: explainAutomaticActionPlan(planAutomaticAction(target, state, {}, classification, { dryRun: true, now: Date.now() })) };
+    if (opts.print !== false) console.log(JSON.stringify(summary, null, 2));
+    return { target, state, pr: null, classification, summary };
   }
   const { pr, classification, rechecks } = ghPrViewWithUnknownRecheck(target);
   const wasDisabled = Boolean(state.disabled);
@@ -1118,8 +1169,9 @@ function handleCheck(target) {
 
   const plannedAction = explainAutomaticActionPlan(planAutomaticAction(target, state, pr, classification, { dryRun: true, now: Date.now() }));
   saveJson(target.statePath, state);
-  console.log(JSON.stringify({ target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled, plannedAction }, null, 2));
-  return { target, state, pr, classification };
+  const summary = { target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled, plannedAction };
+  if (opts.print !== false) console.log(JSON.stringify(summary, null, 2));
+  return { target, state, pr, classification, summary };
 }
 
 function ensureWorktree(target) {
@@ -1534,17 +1586,32 @@ function handleRepair(target, dryRun, opts = {}) {
   }
 }
 
-function handleTargetCommand(target, args) {
-  if (args.cmd === 'check' || args.cmd === 'check-canary') return handleCheck(target);
+function handleTargetCommand(target, args, opts = {}) {
+  if (args.cmd === 'check' || args.cmd === 'check-canary') return handleCheck(target, { print: opts.printCheckSummary });
   return handleRepair(target, args.dryRun, args);
+}
+
+function summarizeTargetResult(target, outcome) {
+  if (outcome?.summary) return { ok: true, ...outcome.summary };
+  if (outcome?.classification) {
+    return {
+      target: target.id,
+      ok: true,
+      kind: outcome.classification.kind,
+      disabled: Boolean(outcome.state?.disabled),
+      plannedAction: explainAutomaticActionPlan(planAutomaticAction(target, outcome.state || {}, outcome.pr || {}, outcome.classification, { dryRun: true, now: Date.now() })),
+    };
+  }
+  return { target: target.id, ok: true };
 }
 
 export function orchestrateTargets(targets, args) {
   const results = [];
+  const printCheckSummary = targets.length <= 1;
   for (const target of targets) {
     try {
-      handleTargetCommand(target, args);
-      results.push({ target: target.id, ok: true });
+      const outcome = handleTargetCommand(target, args, { printCheckSummary });
+      results.push(summarizeTargetResult(target, outcome));
     } catch (err) {
       results.push({ target: target.id, ok: false, error: redact(err.message) });
       console.error(`[pr-shepherd:${target.id}] ${redact(err.message).slice(0, 8000)}`);
@@ -1579,6 +1646,7 @@ export function main(argv = process.argv.slice(2)) {
     for (const target of targets) handleCanary(target);
     return targets;
   }
+  assertMultiTargetLiveRepairAllowed(cfg, targets, args);
   orchestrateTargets(targets, args);
 }
 
