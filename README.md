@@ -78,6 +78,34 @@ the command, target id, operator approval, and result, but must not include secr
 OpenClaw runtime/bootstrap context files. If those files would enter a branch diff or evidence bundle, stop before
 PR creation and report the repo-relative offending paths.
 
+## Approval/action ledger operating procedure
+
+Use an append-only ledger in the operator issue, PR thread, or incident record for every PR Shepherd run that may
+lead to branch or evidence mutation. The ledger is the audit trail for what was approved, what ran, and what
+happened; do not replace it with raw shell history or unsanitized session logs.
+
+Ledger entries should be short, linkable, and ordered:
+
+1. **Start**: post `Start` before work begins. Include the target issue/PR, target id, intended command or doc/code
+   scope, actor, and timestamp when the ledger system supports it. Save the resulting `startCommentUrl`.
+2. **Approval**: before any live `repair`, record the approving operator, target PR, allowed branch, command argv,
+   approval scope, approval time, and the rehearsal/evidence link that justifies the action. Approval must be
+   one-shot and target-specific unless it explicitly names every covered target.
+3. **Action**: when a command runs, record the sanitized argv, actor, target id, expected head/base refs when
+   relevant, start/end time, result, and evidence links. Redact secrets and replace private host paths with stable
+   labels such as `<worktree-root>` or `<state-root>`.
+4. **Closeout**: finish with exactly one terminal marker:
+   - `PR: <url>` when a reviewable branch/PR was created.
+   - `Done` when no PR is required and the requested safe action completed.
+   - `Block` when the run failed closed or needs human input.
+   Save and report the matching `prUrl`, `doneCommentUrl`, or `blockCommentUrl` when available.
+
+Before posting `PR` or attaching evidence, run a fail-closed contamination check against the branch diff and any
+planned artifact bundle. If any OpenClaw runtime/bootstrap context path would be committed or attached, stop,
+post `Block`, and report the exact repo-relative path(s), including matches for `AGENTS.md`, `SOUL.md`, `USER.md`,
+`TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`. Do not include the contents of those files in the
+ledger; path names and the blocking reason are enough.
+
 ## Code-assisted operations and approval gates
 
 PR Shepherd is intended to assist a human operator, not to make broad autonomous code changes.
@@ -104,8 +132,8 @@ push budgets are notification-only outcomes that require human intervention.
 Automatic action planning is explicit and fail-closed. `check`/`check-canary` may refresh state and notify,
 `rehearse`/`repair --dry-run` records recent rehearsal evidence without branch mutation, and conflict handling
 plans either deterministic `autoSafe` repair or artifact/escalation. Live branch mutation is blocked unless
-`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvedAt`, `approvedBy`,
-a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
+`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`, `approvedAt`,
+`approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
 and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
 that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`.
 
@@ -135,7 +163,10 @@ credentialed URLs.
 
 `status` is also read-only and does not contact GitHub. It summarizes the selected target state file(s),
 including disabled state, last kind, mergeability fields, last seen head/base, failure names, pending
-count, recent auto-push count, and the last notification key.
+count, recent auto-push count, the last notification key, and a concise recent action-ledger summary.
+The ledger is stored in state as `actionLedger` entries with approval id/operator/scope, expected
+head/base or repair key, action class, result, and rollback/disable notes; duplicate entry ids are not
+appended on replay, and ledger values are sanitized for secrets and configured private operator paths.
 
 Safe check-only rollout:
 
