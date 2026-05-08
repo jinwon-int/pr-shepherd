@@ -400,6 +400,13 @@ Example unit files are included but not installed:
 
 - `pr-shepherd@.service.example`
 - `pr-shepherd@.timer.example`
+- `examples/field-deploy/pr-shepherd-check-canary@.service.example`
+- `examples/field-deploy/pr-shepherd-check-canary@.timer.example`
+
+For Telegram/OpenClaw situation-report packaging, see `examples/field-deploy/`. It includes a
+no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*` environment values,
+a config `notify` fragment for full reports on every 10-minute check, and a reversible user-systemd
+canary install sketch. Keep the copied env file and Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
 
