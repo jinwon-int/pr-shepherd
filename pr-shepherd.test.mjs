@@ -345,6 +345,45 @@ test('canary command exercises command notifier hook without GitHub or state mut
   }
 });
 
+test('field deployment Telegram wrapper examples default to check-only no-send', () => {
+  const wrapperPath = new URL('./examples/field-deploy/pr-shepherd-openclaw-telegram-notify.sh', import.meta.url).pathname;
+  const servicePath = new URL('./examples/field-deploy/pr-shepherd-check-canary@.service.example', import.meta.url).pathname;
+  const timerPath = new URL('./examples/field-deploy/pr-shepherd-check-canary@.timer.example', import.meta.url).pathname;
+  const fragmentPath = new URL('./examples/field-deploy/openclaw-78261-notify.fragment.example.json', import.meta.url).pathname;
+
+  const syntax = spawnSync('sh', ['-n', wrapperPath], { encoding: 'utf8' });
+  assert.equal(syntax.status, 0, syntax.stderr);
+
+  const dryRun = spawnSync('sh', [wrapperPath], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PR_SHEPHERD_MESSAGE: '[pr-shepherd:openclaw-78261] openclaw/openclaw#78261 situation report classification=clean nextAction=none / no action needed',
+      PR_SHEPHERD_TARGET: 'openclaw-78261',
+      PR_SHEPHERD_PR: 'openclaw/openclaw#78261',
+      PR_SHEPHERD_KIND: 'situation',
+      PR_SHEPHERD_KEY: 'situation:clean:test',
+    },
+  });
+  assert.equal(dryRun.status, 0, dryRun.stderr);
+  assert.match(dryRun.stdout, /dryRun=1/);
+  assert.match(dryRun.stdout, /target=openclaw-78261/);
+
+  const fragment = JSON.parse(readFileSync(fragmentPath, 'utf8'));
+  assert.equal(fragment.notify.mode, 'openclaw');
+  assert.equal(fragment.notify.dryRun, true);
+  assert.deepEqual(fragment.notify.command, ['/usr/local/bin/pr-shepherd-openclaw-telegram-notify']);
+  assert.equal(fragment.notify.situationReportEveryMs, 0);
+
+  const service = readFileSync(servicePath, 'utf8');
+  assert.match(service, /PR_SHEPHERD_NOTIFY_DRY_RUN=1/);
+  assert.match(service, /check-canary --config <pr-shepherd-repo>\/config\.json --target %i/);
+  assert.doesNotMatch(service, / repair /);
+
+  const timer = readFileSync(timerPath, 'utf8');
+  assert.match(timer, /OnUnitActiveSec=10min/);
+});
+
 test('check-canary is explicit check-only monitoring and does not require a worktree', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-check-canary-'));
   try {

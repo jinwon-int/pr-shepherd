@@ -1,0 +1,12 @@
+[Unit]
+Description=Run PR Shepherd check-only Telegram/OpenClaw situation report (%i) every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Persistent=true
+Unit=pr-shepherd-check-canary@%i.service
+
+[Install]
+WantedBy=timers.target
