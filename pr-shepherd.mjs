@@ -155,12 +155,28 @@ function secretLookingValues(value, path = 'config', out = []) {
   return out;
 }
 
+function validateConflictPolicyPath(errors, entryPath, rawPath) {
+  const path = String(rawPath || '').trim().replace(/\\/g, '/');
+  if (!path) {
+    errors.push(`${entryPath} must not be empty`);
+    return null;
+  }
+  if (path.startsWith('/') || /^[A-Za-z]:\//.test(path) || path.includes('..')) {
+    errors.push(`${entryPath} must be repo-relative and must not contain ..`);
+  }
+  const runtimeContextPaths = findOpenClawRuntimeContextPaths([path]);
+  if (runtimeContextPaths.length > 0) {
+    errors.push(`${entryPath} must not reference OpenClaw runtime/bootstrap context paths: ${runtimeContextPaths.join(', ')}`);
+  }
+  return path;
+}
+
 function validatePolicyEntry(errors, targetPath, tier, entry, index) {
   const entryPath = `${targetPath}.conflictPolicy.${tier}[${index}]`;
   if (typeof entry === 'string') {
-    if (entry.trim() === '') errors.push(`${entryPath} must not be empty`);
+    const path = validateConflictPolicyPath(errors, entryPath, entry);
     if (tier === 'autoSafe') errors.push(`${entryPath} must be an object with a deterministic resolver`);
-    return entry.trim() ? { path: entry.trim(), entryPath, resolver: null } : null;
+    return path ? { path, entryPath, resolver: null } : null;
   }
   if (!isPlainObject(entry)) {
     errors.push(`${entryPath} must be a path string or object with path`);
@@ -170,12 +186,12 @@ function validatePolicyEntry(errors, targetPath, tier, entry, index) {
     errors.push(`${entryPath}.path is required`);
     return null;
   }
-  if (entry.path.includes('..')) errors.push(`${entryPath}.path must be repo-relative and must not contain ..`);
+  const path = validateConflictPolicyPath(errors, `${entryPath}.path`, entry.path);
   if (tier === 'autoSafe') {
     if (entry.resolver !== 'merge-changelog-top-entry') errors.push(`${entryPath}.resolver must be merge-changelog-top-entry for autoSafe entries`);
     if (entry.resolver === 'merge-changelog-top-entry' && typeof entry.needle !== 'string') errors.push(`${entryPath}.needle is required for merge-changelog-top-entry`);
   }
-  return { path: entry.path.trim(), entryPath, resolver: entry.resolver || null };
+  return path ? { path, entryPath, resolver: entry.resolver || null } : null;
 }
 
 function validateConflictPolicy(errors, target, targetPath) {
