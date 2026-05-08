@@ -96,6 +96,10 @@ Safe check-only rollout:
 
 Notifier modes are `stdout`, `none`, `command`, or `openclaw`. Command/OpenClaw notifiers receive the rendered
 notification in `PR_SHEPHERD_MESSAGE`; do not pass secrets in notifier arguments, and keep notification dedupe per target.
+Live `openclaw` delivery (`dryRun=false`) is fail-closed unless the target config includes
+`notify.liveActivation` with `scope="check-only-reporting"`, `approvedAt`, and `approvedBy`, and the
+live situation-report cadence is at least one hour. Use `canary` for one-shot sends; live activation
+must remain check-only and must not imply repair/push approval.
 
 ## Field deployment, rollback, and first Telegram canary
 
@@ -122,9 +126,10 @@ First Telegram canary procedure:
 
 1. Configure `notify.mode=openclaw` with `dryRun=true` and run `canary`; confirm the rendered message is
    safe, concise, and contains no secrets or private host paths.
-2. Switch to `dryRun=false` only after the operator-owned wrapper is installed. The wrapper should read
-   Telegram/OpenClaw tokens, chat ids, and routing from its environment and receive the rendered report in
-   `PR_SHEPHERD_MESSAGE`.
+2. Switch to `dryRun=false` only after the operator-owned wrapper is installed and the config records
+   `notify.liveActivation` with `scope="check-only-reporting"`, `approvedAt`, and `approvedBy`. The wrapper
+   should read Telegram/OpenClaw tokens, chat ids, and routing from its environment and receive the rendered
+   report in `PR_SHEPHERD_MESSAGE`. Keep `situationReportEveryMs` at one hour or more for live delivery.
 3. Re-run `canary --target <id>` and confirm exactly one Telegram message arrives for the chosen target.
 4. Run one manual `check-canary --target <id>` to verify the real read-only GitHub/state path sends the
    expected situation report and does not duplicate messages.
