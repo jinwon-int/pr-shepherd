@@ -70,6 +70,60 @@ node pr-shepherd.mjs canary --config config.json --target openclaw-78261
 node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
 ```
 
+## Check-only standing operations rollout
+
+Use this as the operator-owned Phase A runbook for moving from local validation to standing `check-canary`
+operations. The default posture is no-send and reversible: keep `notify.dryRun=true`, keep
+`PR_SHEPHERD_NOTIFY_DRY_RUN=1`, and schedule only `check-canary --config <pr-shepherd-repo>/config.json --target <id>`.
+Do not schedule `repair`, `rehearse`, `--all`, or any wrapper that can mutate a branch.
+
+Before scheduling:
+
+1. Post `Start` in the operator ledger and save the comment URL.
+2. Run `npm run doctor:field-deploy`, then `node pr-shepherd.mjs validate --config config.json`.
+3. Run one local no-send notifier canary and one manual `check-canary --target <id>`.
+4. Confirm the evidence contains only sanitized summaries: command, target id, result, and redacted log link.
+   Do not attach tokens, chat ids, private host paths, raw session dumps, or runtime/bootstrap context files.
+
+Scheduling options:
+
+- **systemd user timer:** copy the example service/timer above, leave `PR_SHEPHERD_NOTIFY_DRY_RUN=1`, and enable
+  only `pr-shepherd-check-canary@<id>.timer` for the first target.
+- **OpenClaw cron or equivalent scheduler:** create one operator-owned scheduled job whose effect is the same
+  argv as the systemd service: `node <pr-shepherd-repo>/pr-shepherd.mjs check-canary --config <pr-shepherd-repo>/config.json --target <id>`.
+  The job should summarize the run to the operator ledger or a private ops channel, not send live Telegram reports
+  unless the live check-only canary below is separately approved.
+
+State and evidence rotation checklist:
+
+- Capture `status --target <id>` before moving or archiving a state file.
+- Rotate scheduler logs by date or run id; keep only sanitized summaries in issue/PR evidence.
+- Preserve state, lock, and notification dedupe files unless an operator explicitly moves them aside for rollback.
+- Re-run the contamination guard before publishing evidence. Block if any branch diff or artifact path is
+  `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`.
+
+First 24-48h observation template:
+
+- Target id / config revision:
+- Scheduler command and cadence:
+- Run window start/end:
+- Interval 1 result: classification, notification key, state write, lock behavior:
+- Interval 2 result: classification, notification key, state write, lock behavior:
+- Noise check: duplicate or missing notifications:
+- Hygiene check: no secrets, chat ids, private paths, raw session dumps, or runtime/bootstrap context paths:
+- Decision: `promote-check-only`, `extend-observation`, or `rollback`:
+- Operator and ledger closeout URL:
+
+One-shot live Telegram/OpenClaw reporting canary checklist:
+
+1. Keep the standing timer dry-run. Live reporting is a manual one-shot check-only test, not a repair approval.
+2. Record `notify.liveActivation.scope="check-only-reporting"`, `approvedAt`, and `approvedBy`; keep the live cadence
+   at one hour or more.
+3. Set `notify.dryRun=false` and `PR_SHEPHERD_NOTIFY_DRY_RUN=0` only for the approved one-shot wrapper environment.
+4. Run one manual `check-canary --target <id>` and wait for an operator-visible receipt.
+5. If the receipt is missing, duplicated, or routed incorrectly, switch back to dry-run, disable any live schedule,
+   and post `Block`. A successful receipt may close as `Done` or support a review PR, but it still does not enable repair.
+
 ## Field doctor
 
 When a copied unit, wrapper, or config change behaves unexpectedly, run the same read-only doctor sequence
