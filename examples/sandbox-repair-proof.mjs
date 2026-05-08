@@ -143,6 +143,7 @@ async function main() {
           liveRepair: {
             enabled: true,
             scope: 'auto-safe-repair',
+            approvalId: 'sandbox-proof-approval',
             approvedAt: new Date().toISOString(),
             approvedBy: 'sandbox-proof-harness',
             branchAllowlist: [headBranch],

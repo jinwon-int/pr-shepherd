@@ -132,8 +132,8 @@ push budgets are notification-only outcomes that require human intervention.
 Automatic action planning is explicit and fail-closed. `check`/`check-canary` may refresh state and notify,
 `rehearse`/`repair --dry-run` records recent rehearsal evidence without branch mutation, and conflict handling
 plans either deterministic `autoSafe` repair or artifact/escalation. Live branch mutation is blocked unless
-`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvedAt`, `approvedBy`,
-a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
+`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`, `approvedAt`,
+`approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
 and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
 that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`.
 
@@ -163,7 +163,10 @@ credentialed URLs.
 
 `status` is also read-only and does not contact GitHub. It summarizes the selected target state file(s),
 including disabled state, last kind, mergeability fields, last seen head/base, failure names, pending
-count, recent auto-push count, and the last notification key.
+count, recent auto-push count, the last notification key, and a concise recent action-ledger summary.
+The ledger is stored in state as `actionLedger` entries with approval id/operator/scope, expected
+head/base or repair key, action class, result, and rollback/disable notes; duplicate entry ids are not
+appended on replay, and ledger values are sanitized for secrets and configured private operator paths.
 
 Safe check-only rollout:
 

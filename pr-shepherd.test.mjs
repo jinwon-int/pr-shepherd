@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   AUTOMATIC_ACTION_CLASSES,
+  appendActionLedgerEntry,
   buildConflictArtifactPayload,
   buildSituationReportLine,
   buildStatusRows,
@@ -20,6 +21,7 @@ import {
   planConflictAutomaticAction,
   resolveChangelogConflict,
   selectTargets,
+  summarizeActionLedger,
   validateConfigObject,
 } from './pr-shepherd.mjs';
 
@@ -228,6 +230,7 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
   const bad = validateConfigObject({ targets: [validationTarget({ automaticActions: { liveRepair: { enabled: true } } })] });
   assert.equal(bad.ok, false);
   assert.match(bad.errors.join('\n'), /liveRepair\.scope must be auto-safe-repair/);
+  assert.match(bad.errors.join('\n'), /liveRepair\.approvalId is required/);
   assert.match(bad.errors.join('\n'), /liveRepair\.approvedAt must be an ISO-8601 timestamp/);
   assert.match(bad.errors.join('\n'), /liveRepair\.approvedBy is required/);
   assert.match(bad.errors.join('\n'), /liveRepair\.branchAllowlist must be a non-empty string array/);
@@ -238,6 +241,7 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
         liveRepair: {
           enabled: true,
           scope: 'auto-safe-repair',
+          approvalId: 'approval-1',
           approvedAt: '2026-05-08T05:00:00Z',
           approvedBy: 'operator',
           branchAllowlist: ['feature'],
@@ -246,9 +250,70 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
     })],
   });
   assert.equal(good.ok, true);
+
+  const malformed = validateConfigObject({
+    targets: [validationTarget({
+      automaticActions: {
+        liveRepair: {
+          enabled: false,
+          approvalId: '',
+          approvedAt: 'not-a-date',
+          approvedBy: '',
+        },
+      },
+    })],
+  });
+  assert.equal(malformed.ok, false);
+  assert.match(malformed.errors.join('\n'), /liveRepair\.approvalId must be a non-empty string/);
+  assert.match(malformed.errors.join('\n'), /liveRepair\.approvedAt must be an ISO-8601 timestamp/);
+  assert.match(malformed.errors.join('\n'), /liveRepair\.approvedBy must be a non-empty string/);
 });
 
-test('status command reads state files without network access', () => {
+test('action ledger appends once and redacts secrets/private paths', () => {
+  const state = {};
+  const target = validationTarget({
+    worktreePath: '/private/operator/worktree',
+    statePath: '/private/operator/state/state.json',
+    lockPath: '/private/operator/state/lock',
+    automaticActions: {
+      liveRepair: {
+        enabled: true,
+        scope: 'auto-safe-repair',
+        approvalId: 'approval-ledger-1',
+        approvedAt: '2026-05-08T05:00:00Z',
+        approvedBy: 'operator',
+        branchAllowlist: ['feature'],
+      },
+    },
+  });
+  const entry = {
+    id: 'repair:target-1:abc123:failed',
+    actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+    result: 'failed',
+    approval: {
+      id: 'approval-ledger-1',
+      approvedBy: 'operator',
+      approvedAt: '2026-05-08T05:00:00Z',
+      scope: 'auto-safe-repair',
+    },
+    expectedHeadOid: 'abc123',
+    expectedBaseOid: 'base123',
+    repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY',
+    rollbackNote: 'failed in /private/operator/worktree with token=ghp_123456789012345678901234',
+    details: { log: 'state at /private/operator/state/state.json' },
+  };
+  assert.equal(appendActionLedgerEntry(state, target, entry, new Date('2026-05-08T06:00:00Z')), true);
+  assert.equal(appendActionLedgerEntry(state, target, entry, new Date('2026-05-08T06:01:00Z')), false);
+  assert.equal(state.actionLedger.length, 1);
+  const json = JSON.stringify(state.actionLedger[0]);
+  assert.doesNotMatch(json, /ghp_123456789012345678901234/);
+  assert.doesNotMatch(json, /\/private\/operator/);
+  assert.match(json, /<worktree-root>/);
+  assert.match(json, /<state-file>/);
+  assert.equal(summarizeActionLedger(state.actionLedger).recent[0].approvalId, 'approval-ledger-1');
+});
+
+test('status command reads state files without network access and summarizes the action ledger', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-status-'));
   try {
     const statePath = join(dir, 'state.json');
@@ -264,6 +329,13 @@ test('status command reads state files without network access', () => {
       lastPendingCount: 1,
       lastNotificationKey: 'failed:head-a:lint',
       autoPushes: [{ at: new Date().toISOString(), from: 'old', to: 'new' }],
+      actionLedger: [{
+        at: '2026-05-08T06:00:00Z',
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        result: 'failed',
+        approval: { id: 'approval-status-1', approvedBy: 'operator', scope: 'auto-safe-repair' },
+        repairKey: 'repair:head-a:base-a:CONFLICTING:DIRTY',
+      }],
     }));
     writeFileSync(configPath, JSON.stringify({
       targets: [validationTarget({ statePath, lockPath: join(dir, 'lock'), worktreePath: join(dir, 'worktree') })],
@@ -280,6 +352,9 @@ test('status command reads state files without network access', () => {
     assert.equal(status.lastKind, 'failed');
     assert.deepEqual(status.lastFailureNames, ['lint']);
     assert.equal(status.recentAutoPushCount, 1);
+    assert.equal(status.actionLedger.count, 1);
+    assert.equal(status.actionLedger.recent[0].approvalId, 'approval-status-1');
+    assert.equal(status.actionLedger.recent[0].result, 'failed');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -732,6 +807,7 @@ test('automatic action planner records rehearsal before permitting gated live re
       liveRepair: {
         enabled: true,
         scope: 'auto-safe-repair',
+        approvalId: 'approval-1',
         approvedAt: '2026-05-08T05:00:00Z',
         approvedBy: 'operator',
         branchAllowlist: ['feature'],
@@ -773,6 +849,7 @@ test('automatic action planner enforces branch allowlist and maintainer boundary
       liveRepair: {
         enabled: true,
         scope: 'auto-safe-repair',
+        approvalId: 'approval-2',
         approvedAt: '2026-05-08T05:00:00Z',
         approvedBy: 'operator',
         branchAllowlist: ['other-branch'],
