@@ -231,6 +231,25 @@ Operational notes:
 - Do not schedule `repair` from the same timer. Keep repair as a manual one-shot approval boundary,
   starting with `repair --dry-run` when investigation is needed.
 
+Canary rollback:
+
+1. Disable the scheduler for the canary target, for example `systemctl disable --now pr-shepherd@<id>.timer`,
+   or remove the equivalent cron/OpenClaw schedule.
+2. Run `node pr-shepherd.mjs status --config <repo>/config.json --target <id>` and save the final JSON summary
+   with the scheduler logs as rollback evidence.
+3. Leave the target state file in place unless it contains bad dedupe data from a misconfigured run; if reset is
+   needed, move it aside rather than deleting it so the old notification keys can be audited.
+4. Keep live `repair` disabled. A check-only rollback must not fetch worktrees, rebase, create artifacts, or push.
+
+Rehearsal closeout:
+
+- Record the canary target id, config revision, scheduler command, first and last observed run times, and whether
+  notifications, locks, and state updates behaved as expected.
+- Confirm no duplicate notifications, lock contention, state write errors, secret-looking config values, private
+  host paths, or OpenClaw runtime/bootstrap context paths appeared in logs or artifacts.
+- Mark the rehearsal outcome as `promote`, `extend`, or `rollback`, and name the operator who approved the next
+  step. Promotion means adding more check-only targets only; live repair still requires a separate approval.
+
 ## Focused verification
 
 After successful rebase the CLI runs:
