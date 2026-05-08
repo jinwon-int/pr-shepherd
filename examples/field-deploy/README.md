@@ -24,6 +24,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
 - `phase-b-observation-noise-control.md` — Phase B rollout guide for observation ledgers, 24-48h
   classification summaries, duplicate/no-action cadence, concise operator reports, rollback, and Phase C
   rehearsal criteria.
+- `phase-c-one-shot-rehearsal-approval.md` — Phase C runbook for one-shot dry-run rehearsal, terminal
+  ledger markers, evidence hygiene, and the separate live repair approval boundary.
 
 ## Safe install sketch
 
@@ -139,6 +141,16 @@ After the Phase A timer is stable, use `phase-b-observation-noise-control.md` to
 observation window. Phase B records classification frequency, last clean/warning state, notification cadence,
 and the next recommended action without enabling repair or branch mutation. Keep detailed evidence in the
 ledger/status output and keep Telegram/OpenClaw reports concise.
+
+## Phase C one-shot rehearsal and approval
+
+Use `phase-c-one-shot-rehearsal-approval.md` only after Phase B evidence supports a single target-specific
+dry-run rehearsal. Phase C starts with a `Start` ledger marker, runs `doctor`, `validate`, `status`, and one
+`rehearse --target <id>` command, then closes with exactly one of `PR: <url>`, `Done`, or `Block`. Before any
+review PR or evidence attachment, fail closed if the branch diff or artifact bundle would include OpenClaw
+runtime/bootstrap context paths. A successful rehearsal does not approve live repair; any live `repair` still
+needs a separate one-shot approval naming the target, branch, exact argv, approval metadata, matching rehearsal
+evidence, and expected refs.
 
 ## Field doctor
 

@@ -69,9 +69,12 @@ Commands that require operator approval:
 
 Roll out in this order: validate the config, run a local notifier canary, run one manual `check-canary`, install
 one check-only timer for one target, observe at least two intervals, then add more check-only targets. Promotion
-never grants repair approval; repair remains a separate one-shot decision. Check-only runs append a bounded
-`observationLedger` in the target state and keep a 24h/48h `observationSummary` so operators can see clean,
-unknown/recheck, failed, and dirty frequency without branch mutation or raw log attachment.
+never grants repair approval; repair remains a separate one-shot decision. Use the
+[Phase C one-shot rehearsal and approval runbook](examples/field-deploy/phase-c-one-shot-rehearsal-approval.md)
+when Phase B evidence justifies a target-specific dry-run rehearsal and a separate live-repair approval record.
+Check-only runs append a bounded `observationLedger` in the target state and keep a 24h/48h `observationSummary`
+so operators can see clean, unknown/recheck, failed, and dirty frequency without branch mutation or raw log
+attachment.
 
 Rollback is non-destructive: disable the scheduler, run `status` for final evidence, keep or move aside state for
 audit, and leave repair/worktrees untouched. Do not rebase, write artifacts, or push as part of rollback. `status`
