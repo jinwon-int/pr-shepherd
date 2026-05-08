@@ -278,6 +278,62 @@ If optional type checks fail due missing/stale dependencies, the CLI runs `pnpm 
 MVP default is `notify.mode=stdout` so OpenClaw cron/systemd can capture output and route summaries.
 Set `notify.mode=none` to keep only the final JSON status output.
 
+### Telegram/OpenClaw situation report runbook
+
+Telegram reporting must be a concise situation report for each scheduled PR Shepherd check, not only a
+risk alert. The scheduler or wrapper may throttle healthy reports to an operator-approved cadence, but it
+must not suppress normal states forever: operators still need periodic “현재 조치할 것 없음 / no action
+needed” summaries for watched PRs.
+
+Build the Telegram message from the final JSON summary on stdout plus any notifier line emitted for an
+action-needed transition. A complete report should include:
+
+- target id and repo/PR reference, preferably with the PR URL when available
+- current classification (`clean`, `unstable`, `failed`, `dirty`, `merged`, `unknown`, or `disabled`)
+- `mergeable` and `mergeStateStatus`
+- failed and pending check counts, with failed check names/details when present
+- last action/rehearsal summary when relevant, for example `check-only; no repair attempted`,
+  `dry-run repair suggested`, or `repair disabled pending operator approval`
+- clear next action: `none / no action needed`, `watch`, `dry-run`, or `operator approval needed`
+
+Suggested next-action mapping:
+
+- `clean`: next action `none`; say “현재 조치할 것 없음 / no action needed”.
+- `unstable`: next action `watch`; include pending count and elapsed pending time if available.
+- `failed`: next action `operator approval needed`; report failed checks and do not auto-repair.
+- `dirty`: next action `dry-run`; live repair still requires a separate operator approval.
+- `merged` or `disabled`: next action `none`; note that future runs are disabled or skipped.
+- `unknown`: next action `operator approval needed`; ask an operator to inspect GitHub state.
+
+Noise control should have two lanes: immediate action-needed delivery for `failed`, `dirty`, long-pending,
+and `unknown` states, plus periodic full summaries for healthy/no-action states. Configure that cadence in
+the scheduler or Telegram/OpenClaw wrapper rather than by dropping all clean reports at PR Shepherd level.
+Keep the JSON summary in logs as machine-readable evidence for every run, including no-action runs.
+
+Example no-action Telegram text:
+
+```text
+PR Shepherd 상황 보고
+target: openclaw-78261
+PR: openclaw/openclaw#78261
+classification: clean (mergeable=MERGEABLE, mergeStateStatus=CLEAN)
+checks: failed=0, pending=0
+last action: check-only; no repair attempted
+next action: none — 현재 조치할 것 없음 / no action needed
+```
+
+Example action-needed Telegram text:
+
+```text
+PR Shepherd 상황 보고 — action needed
+target: openclaw-78261
+PR: openclaw/openclaw#78261
+classification: dirty (mergeable=CONFLICTING, mergeStateStatus=DIRTY)
+checks: failed=0, pending=0
+last action: check-only; no repair attempted
+next action: dry-run, then operator approval before any live repair
+```
+
 Before enabling a hook in a timer, run `canary --config config.json --target <id>` to exercise the
 configured notifier without contacting GitHub, writing state, touching a worktree, or mutating a branch.
 Then run `check-canary --config config.json --target <id>` once manually to exercise the real read-only
@@ -301,6 +357,8 @@ block state updates; use the process logs or your notifier's own telemetry to al
 Notifier hook requirements:
 
 - Treat hooks as notification-only; they must not run `repair`, mutate branches, or push code.
+- For Telegram/OpenClaw delivery, render full situation reports and include no-action summaries; do not
+  rely only on risk-transition notifier lines.
 - Keep output concise and free of secrets, private worktree paths, and OpenClaw runtime/bootstrap
   context such as `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
   `.openclaw/**`.
