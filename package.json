@@ -8,8 +8,9 @@
     "pr-shepherd": "./pr-shepherd.mjs"
   },
   "scripts": {
-    "check": "node --check pr-shepherd.mjs",
+    "check": "node --check pr-shepherd.mjs && node --check examples/sandbox-repair-proof.mjs",
     "test": "node --test pr-shepherd.test.mjs",
+    "proof:sandbox": "node examples/sandbox-repair-proof.mjs",
     "ci": "npm run check && npm test"
   },
   "engines": {
