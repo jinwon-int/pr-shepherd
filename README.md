@@ -46,7 +46,9 @@ or all-target.
 
 PR Shepherd separates automatic observation from operator-approved mutation. Routine automation should
 run only read-only commands from a scheduler, while every command that can touch a worktree or branch is
-kept as an explicit, logged, one-shot operator action.
+kept as an explicit, logged, one-shot operator action. Before promoting repair mechanics, use the
+[sandbox repair proof operating procedure](examples/sandbox-repair-proof.md) for the disposable proof
+sequence and go/no-go criteria.
 
 Automatic scheduler lanes:
 
