@@ -21,6 +21,7 @@ const packageFiles = {
   decision: resolve(here, 'post-live-canary-decision.md'),
   liveReadiness: resolve(here, 'live-readiness-go-no-go.md'),
   phaseAStandingOps: resolve(here, 'phase-a-standing-ops.md'),
+  phaseDOperatorDecisionPacket: resolve(here, 'phase-d-operator-decision-packet.md'),
 };
 
 function usage(exitCode = 1) {
@@ -167,6 +168,17 @@ function packageDoctor() {
     check(/GO for Phase A check-only standing operations; NO-GO for production live repair unless separately approved/i.test(phaseAStandingOps), errors, 'Phase A standing ops must preserve the GO/NO-GO boundary');
     check(!/\brepair\s+--|\brepair\b.*timer|force-with-lease=.*push/i.test(phaseAStandingOps), errors, 'Phase A standing ops must not schedule repair or live force pushes');
     checks.push({ name: 'phase-a-standing-ops', ok: true, path: relativeToRepo(packageFiles.phaseAStandingOps) });
+  }
+
+  const phaseDOperatorDecisionPacket = readText(packageFiles.phaseDOperatorDecisionPacket, errors);
+  if (phaseDOperatorDecisionPacket) {
+    check(/Phase D operator decision packet/i.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must name the operator decision packet');
+    check(/GO live repair|NO-GO continue observation|NO-GO block/i.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must document GO/NO-GO decision outcomes');
+    check(/node pr-shepherd\.mjs repair --config config\.json --target <target-id>/.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must name the target-specific live repair command under consideration');
+    check(/--force-with-lease=<branch>:<expected-head>/.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must preserve the expected-head force-with-lease guard');
+    check(/`Start`/.test(phaseDOperatorDecisionPacket) && /`PR: <url>`/.test(phaseDOperatorDecisionPacket) && /`Done`/.test(phaseDOperatorDecisionPacket) && /`Block`/.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must preserve Start and terminal ledger markers');
+    check(/AGENTS\.md/.test(phaseDOperatorDecisionPacket) && /\.openclaw\/\*\*/.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must include the runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-d-operator-decision-packet', ok: true, path: relativeToRepo(packageFiles.phaseDOperatorDecisionPacket) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);

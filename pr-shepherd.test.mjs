@@ -748,6 +748,7 @@ test('field deployment doctor package is read-only and validates check-only cana
     assert.equal(report.reports.package.checks.some((check) => check.name === 'wrapper'), true);
     assert.equal(report.reports.package.checks.some((check) => check.name === 'live-readiness-go-no-go'), true);
     assert.equal(report.reports.package.checks.some((check) => check.name === 'phase-a-standing-ops'), true);
+    assert.equal(report.reports.package.checks.some((check) => check.name === 'phase-d-operator-decision-packet'), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

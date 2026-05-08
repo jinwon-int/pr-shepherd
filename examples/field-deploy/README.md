@@ -26,6 +26,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   rehearsal criteria.
 - `phase-c-one-shot-rehearsal-approval.md` — Phase C runbook for one-shot dry-run rehearsal, terminal
   ledger markers, evidence hygiene, and the separate live repair approval boundary.
+- `phase-d-operator-decision-packet.md` — Phase D packet template for the final GO/NO-GO decision before one
+  target-specific live repair, including approval metadata, evidence hygiene, and closeout markers.
 
 ## Safe install sketch
 
@@ -151,6 +153,14 @@ review PR or evidence attachment, fail closed if the branch diff or artifact bun
 runtime/bootstrap context paths. A successful rehearsal does not approve live repair; any live `repair` still
 needs a separate one-shot approval naming the target, branch, exact argv, approval metadata, matching rehearsal
 evidence, and expected refs.
+
+## Phase D operator decision packet
+
+Use `phase-d-operator-decision-packet.md` after Phase C only when an operator is ready to make the final
+GO/NO-GO decision for one target-specific live repair. Phase D records the target, exact live command, allowed
+branch, expected refs, approval scope, focused checks, push budget, and contamination guard result before any
+`repair --target <id>` command may run. It closes with exactly one terminal marker: `PR: <url>`, `Done`, or
+`Block`; a GO decision is one-shot and never authorizes standing repair automation.
 
 ## Field doctor
 
