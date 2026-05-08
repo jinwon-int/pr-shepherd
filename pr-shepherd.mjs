@@ -521,6 +521,33 @@ function ghPrView(target) {
   return JSON.parse(res.stdout);
 }
 
+function sleepMs(ms) {
+  const duration = Number(ms);
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
+}
+
+function shouldRecheckUnknown(classification) {
+  return classification.kind === 'unknown'
+    && classification.checks.failed.length === 0
+    && classification.checks.pending.length === 0;
+}
+
+function ghPrViewWithUnknownRecheck(target) {
+  const maxRechecks = Math.max(0, Number.isFinite(Number(target.unknownRecheckAttempts)) ? Number(target.unknownRecheckAttempts) : 2);
+  const delayMs = Math.max(0, Number.isFinite(Number(target.unknownRecheckDelayMs)) ? Number(target.unknownRecheckDelayMs) : 1500);
+  let pr = ghPrView(target);
+  let classification = classifyPr(pr);
+  let rechecks = 0;
+  while (rechecks < maxRechecks && shouldRecheckUnknown(classification)) {
+    rechecks += 1;
+    sleepMs(delayMs);
+    pr = ghPrView(target);
+    classification = classifyPr(pr);
+  }
+  return { pr, classification, rechecks };
+}
+
 export function classifyChecks(statusCheckRollup = []) {
   const failed = [];
   const pending = [];
@@ -872,10 +899,10 @@ function handleCheck(target) {
     console.log(`[pr-shepherd:${target.id}] disabled`);
     return { target, state, pr: null, classification };
   }
-  const pr = ghPrView(target);
-  const classification = classifyPr(pr);
+  const { pr, classification, rechecks } = ghPrViewWithUnknownRecheck(target);
   updateStateFromPr(state, pr, classification);
   state.lastKind = classification.kind;
+  state.lastUnknownRecheckCount = rechecks;
 
   if (classification.kind === 'unstable') {
     const pendingSince = state.pendingSince || new Date().toISOString();
@@ -887,7 +914,7 @@ function handleCheck(target) {
   maybeNotifySituationReport(target, state, pr, classification);
 
   saveJson(target.statePath, state);
-  console.log(JSON.stringify({ target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, disabled: state.disabled }, null, 2));
+  console.log(JSON.stringify({ target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled }, null, 2));
   return { target, state, pr, classification };
 }
 
