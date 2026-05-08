@@ -12,6 +12,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   consumes `PR_SHEPHERD_MESSAGE` and related `PR_SHEPHERD_*` metadata.
 - `pr-shepherd-check-canary@.service.example` / `.timer.example` — user-systemd
   examples for a 10-minute `check-canary --target %i` schedule.
+- `post-live-canary-decision.md` — ops decision record for limiting live reporting to
+  the observed canary lane.
 
 ## Safe install sketch
 
