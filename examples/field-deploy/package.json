@@ -1,0 +1,14 @@
+{
+  "name": "@jinwon-int/pr-shepherd-field-deploy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only doctor for PR Shepherd field deployment examples and check-only canary config.",
+  "bin": {
+    "pr-shepherd-field-deploy-doctor": "./doctor.mjs"
+  },
+  "scripts": {
+    "doctor": "node doctor.mjs"
+  },
+  "license": "UNLICENSED"
+}
