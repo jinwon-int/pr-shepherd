@@ -12,6 +12,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   consumes `PR_SHEPHERD_MESSAGE` and related `PR_SHEPHERD_*` metadata.
 - `pr-shepherd-check-canary@.service.example` / `.timer.example` — user-systemd
   examples for a 10-minute `check-canary --target %i` schedule.
+- `doctor.mjs` / `package.json` — read-only doctor package for validating these examples
+  and selected check-only canary config before field rollout.
 - `post-live-canary-decision.md` — ops decision record for limiting live reporting to
   the observed canary lane.
 
@@ -40,7 +42,19 @@ PR_SHEPHERD_OPENCLAW_PREFIX=[PR Shepherd]
 
 Do not commit that env file. Keep routing values and any OpenClaw credentials in the operator environment, not this repository.
 
-## Dry-run smoke
+## Doctor and dry-run smoke
+
+Run the read-only doctor before copying files to an operator host or publishing evidence:
+
+```bash
+npm run doctor:field-deploy
+# or, from this directory after install/copy:
+npm run doctor -- --config ../../config.json --target openclaw-78261
+```
+
+The doctor validates the package examples, checks that no service schedules `repair`, confirms the wrapper defaults to no-send, and reports config issues or evidence hygiene warnings without contacting GitHub or sending messages.
+
+Then run the dry-run smoke:
 
 ```bash
 node pr-shepherd.mjs validate --config config.json
@@ -53,6 +67,23 @@ examples/field-deploy/pr-shepherd-openclaw-telegram-notify.sh
 node pr-shepherd.mjs canary --config config.json --target openclaw-78261
 node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
 ```
+
+## Field doctor
+
+When a copied unit, wrapper, or config change behaves unexpectedly, run the same read-only doctor sequence
+manually before enabling the timer again:
+
+```bash
+node pr-shepherd.mjs validate --config config.json
+node pr-shepherd.mjs status --config config.json --target openclaw-78261
+node pr-shepherd.mjs canary --config config.json --target openclaw-78261
+node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
+```
+
+A field doctor result is healthy only when validation passes, the target state is readable or explicitly absent
+for a first run, the wrapper stays no-send unless live check-only reporting was approved, and no log/evidence
+contains secrets, private host paths, or OpenClaw runtime/bootstrap context paths. If any check fails, keep the
+timer disabled and record `Block` with the sanitized failing command and target id.
 
 ## First live canary boundary
 

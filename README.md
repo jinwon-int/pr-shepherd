@@ -19,6 +19,7 @@ node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-r
 node pr-shepherd.mjs repair --config config.json --all --dry-run
 node pr-shepherd.mjs repair --config config.json
 node pr-shepherd.mjs repair --config config.json --artifact-dir ./artifacts --no-keep-failed-rebase-worktree
+npm run doctor:field-deploy
 npm run proof:sandbox
 ```
 
@@ -218,6 +219,9 @@ promote only more check-only monitoring. Live `repair` remains a separate one-sh
 
 Field deployment sequence:
 
+0. Run `npm run doctor:field-deploy` locally. The doctor is read-only: it validates the field deployment
+   example package and selected canary config without contacting GitHub, sending messages, touching worktrees,
+   creating artifacts, or scheduling services.
 1. Install the repository on the operator host with Node.js 20+, `git`, and authenticated `gh`.
 2. Keep credentials and Telegram/OpenClaw routing in the service environment or wrapper, not in
    `config.json` or checked-in unit files.
@@ -257,6 +261,37 @@ Rollback is intentionally simple and non-destructive:
    move it aside rather than deleting it.
 4. Keep live `repair` disabled and leave worktrees untouched. A rollback must not rebase, write conflict
    artifacts, or push branches.
+
+### Operator doctor procedure
+
+Use the doctor procedure when installing PR Shepherd on a new host, after changing `config.json`, or when
+the scheduler/notifier looks unhealthy. It is a read-only health check sequence assembled from existing
+commands; it is not approval to run `repair`.
+
+Run the checks in this order and save only sanitized summaries:
+
+```bash
+node pr-shepherd.mjs validate --config config.json
+node pr-shepherd.mjs status --config config.json --all
+node pr-shepherd.mjs canary --config config.json --target <id>
+node pr-shepherd.mjs check-canary --config config.json --target <id>
+```
+
+Doctor pass criteria:
+
+- `validate` exits successfully with no unsafe target, notifier, path, duplicate lock/state, or secret-looking
+  config findings.
+- `status --all` can read every enabled target state file or clearly reports the missing state for a first run.
+- `canary` renders the notifier payload without contacting GitHub, writing target state, touching a worktree,
+  or sending live Telegram/OpenClaw traffic unless a check-only live activation is already approved.
+- `check-canary` can read the selected GitHub PR, update only that target's state/lock files, and emit at most
+  one deduplicated situation report.
+
+If any doctor step fails, stop the rollout, keep timers disabled, and post `Block` with the failing command,
+target id, exit code, and sanitized log link. Do not attach raw shell transcripts. Before sharing doctor evidence
+or creating a PR from a field run, verify that no branch diff or artifact bundle includes secrets, private host
+paths, or OpenClaw runtime/bootstrap context paths such as `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`,
+`HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`; path names are enough for a block report.
 
 ## Status classification
 
