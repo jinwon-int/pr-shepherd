@@ -19,6 +19,7 @@ export const OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES = [
 ];
 
 export const DEFAULT_SITUATION_REPORT_EVERY_MS = 6 * 60 * 60 * 1000;
+export const MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS = 60 * 60 * 1000;
 
 export function findOpenClawRuntimeContextPaths(paths = []) {
   const rootFiles = new Set(OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES);
@@ -199,6 +200,31 @@ function validateConflictPolicy(errors, target, targetPath) {
   }
 }
 
+function validateLiveOpenClawActivation(errors, notify, targetPath) {
+  const notifyPath = `${targetPath}.notify`;
+  const cadenceMs = notify.situationReportEveryMs === undefined
+    ? DEFAULT_SITUATION_REPORT_EVERY_MS
+    : Number(notify.situationReportEveryMs);
+  if (Number.isFinite(cadenceMs) && cadenceMs < MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS) {
+    errors.push(`${notifyPath}.situationReportEveryMs must be at least ${MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS} when notify.mode is openclaw and dryRun is false; use canary for one-shot sends and keep live reports rate-limited`);
+  }
+
+  const activation = notify.liveActivation;
+  if (!isPlainObject(activation)) {
+    errors.push(`${notifyPath}.liveActivation is required when notify.mode is openclaw and dryRun is false`);
+    return;
+  }
+  if (activation.scope !== 'check-only-reporting') {
+    errors.push(`${notifyPath}.liveActivation.scope must be check-only-reporting`);
+  }
+  if (typeof activation.approvedAt !== 'string' || Number.isNaN(Date.parse(activation.approvedAt))) {
+    errors.push(`${notifyPath}.liveActivation.approvedAt must be an ISO-8601 timestamp`);
+  }
+  if (typeof activation.approvedBy !== 'string' || activation.approvedBy.trim() === '') {
+    errors.push(`${notifyPath}.liveActivation.approvedBy is required`);
+  }
+}
+
 export function validateConfigObject(cfg, configPath = null) {
   const errors = [];
   const warnings = [];
@@ -270,6 +296,7 @@ export function validateConfigObject(cfg, configPath = null) {
         if (notifyMode === 'openclaw') {
           if (target.notify.dryRun !== undefined && typeof target.notify.dryRun !== 'boolean') errors.push(`${targetPath}.notify.dryRun must be a boolean`);
           if (target.notify.dryRun === false && !hasCommand) errors.push(`${targetPath}.notify.command is required when notify.mode is openclaw and dryRun is false`);
+          if (target.notify.dryRun === false) validateLiveOpenClawActivation(errors, target.notify, targetPath);
           for (const forbidden of ['token', 'botToken', 'gatewayToken', 'chatId', 'chatID', 'chat', 'to']) {
             if (target.notify[forbidden] !== undefined) errors.push(`${targetPath}.notify.${forbidden} must not be stored in config; keep OpenClaw/Telegram routing and credentials in the operator environment`);
           }

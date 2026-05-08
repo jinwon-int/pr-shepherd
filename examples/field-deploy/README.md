@@ -12,6 +12,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   consumes `PR_SHEPHERD_MESSAGE` and related `PR_SHEPHERD_*` metadata.
 - `pr-shepherd-check-canary@.service.example` / `.timer.example` — user-systemd
   examples for a 10-minute `check-canary --target %i` schedule.
+- `post-live-canary-decision.md` — ops decision record for limiting live reporting to
+  the observed canary lane.
 
 ## Safe install sketch
 
@@ -54,7 +56,7 @@ node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
 
 ## First live canary boundary
 
-Live Telegram/OpenClaw delivery is a one-shot operator action, not part of tests. Delivery goes through the OpenClaw CLI so OpenClaw owns Telegram routing, allowlists, and provider credentials. After the dry-run smoke is approved, set both config `notify.dryRun=false` and env `PR_SHEPHERD_NOTIFY_DRY_RUN=0`, confirm `PR_SHEPHERD_OPENCLAW_TARGET` is operator-managed, then run one manual `check-canary` and switch back to dry-run if the operator-visible receipt is not confirmed.
+Live Telegram/OpenClaw delivery is a one-shot operator action, not part of tests. Delivery goes through the OpenClaw CLI so OpenClaw owns Telegram routing, allowlists, and provider credentials. After the dry-run smoke is approved, set config `notify.dryRun=false` only with `notify.liveActivation.scope="check-only-reporting"`, `approvedAt`, and `approvedBy`; keep live `situationReportEveryMs` at one hour or more. Set env `PR_SHEPHERD_NOTIFY_DRY_RUN=0`, confirm `PR_SHEPHERD_OPENCLAW_TARGET` is operator-managed, then run one manual `check-canary` and switch back to dry-run if the operator-visible receipt is not confirmed. This is check-only reporting approval, not repair or push approval.
 
 Rollback is reversible:
 
