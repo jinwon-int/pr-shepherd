@@ -97,6 +97,52 @@ Safe check-only rollout:
 Notifier modes are `stdout`, `none`, `command`, or `openclaw`. Command/OpenClaw notifiers receive the rendered
 notification in `PR_SHEPHERD_MESSAGE`; do not pass secrets in notifier arguments, and keep notification dedupe per target.
 
+## Field deployment, rollback, and first Telegram canary
+
+Use a staged field rollout: validate config, prove read-only monitoring, prove Telegram delivery, then
+promote only more check-only monitoring. Live `repair` remains a separate one-shot operator approval.
+
+Field deployment sequence:
+
+1. Install the repository on the operator host with Node.js 20+, `git`, and authenticated `gh`.
+2. Keep credentials and Telegram/OpenClaw routing in the service environment or wrapper, not in
+   `config.json` or checked-in unit files.
+3. Configure one target with unique `worktreePath`, `statePath`, and `lockPath`; use read-only GitHub
+   credentials for the first monitor.
+4. Run `node pr-shepherd.mjs validate --config config.json` and fix every warning/error before scheduling.
+5. Run `node pr-shepherd.mjs canary --config config.json --target <id>` to exercise the notifier without
+   contacting GitHub or writing target state.
+6. Run `node pr-shepherd.mjs check-canary --config config.json --target <id>` once manually and save the
+   JSON summary plus wrapper logs as deployment evidence.
+7. Enable only the check-only timer, for example `systemctl enable --now pr-shepherd@<id>.timer`.
+8. Observe at least two intervals before adding targets. Promotion means more `check`/`check-canary`
+   coverage only; do not schedule `repair`.
+
+First Telegram canary procedure:
+
+1. Configure `notify.mode=openclaw` with `dryRun=true` and run `canary`; confirm the rendered message is
+   safe, concise, and contains no secrets or private host paths.
+2. Switch to `dryRun=false` only after the operator-owned wrapper is installed. The wrapper should read
+   Telegram/OpenClaw tokens, chat ids, and routing from its environment and receive the rendered report in
+   `PR_SHEPHERD_MESSAGE`.
+3. Re-run `canary --target <id>` and confirm exactly one Telegram message arrives for the chosen target.
+4. Run one manual `check-canary --target <id>` to verify the real read-only GitHub/state path sends the
+   expected situation report and does not duplicate messages.
+5. Capture the target id, config revision, wrapper version, observed Telegram delivery time, and final
+   JSON summary. Do not include tokens, chat ids, private paths, or runtime/bootstrap context files in
+   the evidence.
+
+Rollback is intentionally simple and non-destructive:
+
+1. Disable the scheduler, for example `systemctl disable --now pr-shepherd@<id>.timer`, or remove the
+   equivalent cron/OpenClaw schedule.
+2. Run `node pr-shepherd.mjs status --config config.json --target <id>` and save the final JSON summary
+   with scheduler/wrapper logs.
+3. Leave the state file in place for audit unless it contains bad dedupe state; if resetting is required,
+   move it aside rather than deleting it.
+4. Keep live `repair` disabled and leave worktrees untouched. A rollback must not rebase, write conflict
+   artifacts, or push branches.
+
 ## Status classification
 
 - `merged`: `mergedAt` exists or state is `MERGED`; notify once and disable.
