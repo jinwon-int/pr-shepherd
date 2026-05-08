@@ -19,6 +19,7 @@ node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-r
 node pr-shepherd.mjs repair --config config.json --all --dry-run
 node pr-shepherd.mjs repair --config config.json
 node pr-shepherd.mjs repair --config config.json --artifact-dir ./artifacts --no-keep-failed-rebase-worktree
+npm run doctor:field-deploy
 npm run proof:sandbox
 ```
 
@@ -218,6 +219,9 @@ promote only more check-only monitoring. Live `repair` remains a separate one-sh
 
 Field deployment sequence:
 
+0. Run `npm run doctor:field-deploy` locally. The doctor is read-only: it validates the field deployment
+   example package and selected canary config without contacting GitHub, sending messages, touching worktrees,
+   creating artifacts, or scheduling services.
 1. Install the repository on the operator host with Node.js 20+, `git`, and authenticated `gh`.
 2. Keep credentials and Telegram/OpenClaw routing in the service environment or wrapper, not in
    `config.json` or checked-in unit files.

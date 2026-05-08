@@ -638,6 +638,50 @@ test('canary command exercises command notifier hook without GitHub or state mut
   }
 });
 
+test('field deployment doctor package is read-only and validates check-only canary config', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-field-doctor-'));
+  try {
+    const doctorPath = new URL('./examples/field-deploy/doctor.mjs', import.meta.url).pathname;
+    const configPath = join(dir, 'config.json');
+    const statePath = join(dir, 'state.json');
+    const lockPath = join(dir, 'lock');
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        id: 'openclaw-78261',
+        pr: 'openclaw/openclaw#78261',
+        owner: 'openclaw',
+        repo: 'openclaw',
+        number: 78261,
+        statePath,
+        lockPath,
+        worktreePath: join(dir, 'missing-worktree'),
+        notify: {
+          mode: 'openclaw',
+          dryRun: true,
+          command: ['/usr/local/bin/pr-shepherd-openclaw-telegram-notify'],
+          situationReportEveryMs: 0,
+        },
+      })],
+    }));
+
+    const result = spawnSync(process.execPath, [doctorPath, '--config', configPath, '--target', 'openclaw-78261'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: '/nonexistent-gh' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(statePath), false);
+    assert.equal(existsSync(lockPath), false);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.schema, 'pr-shepherd-field-deploy-doctor/v1');
+    assert.equal(report.ok, true);
+    assert.deepEqual(report.errors, []);
+    assert.equal(report.reports.config.targets[0].target, 'openclaw-78261');
+    assert.equal(report.reports.package.checks.some((check) => check.name === 'wrapper'), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('field deployment Telegram wrapper examples default to check-only no-send', () => {
   const wrapperPath = new URL('./examples/field-deploy/pr-shepherd-openclaw-telegram-notify.sh', import.meta.url).pathname;
   const servicePath = new URL('./examples/field-deploy/pr-shepherd-check-canary@.service.example', import.meta.url).pathname;
