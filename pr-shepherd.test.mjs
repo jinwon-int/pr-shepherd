@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   buildConflictArtifactPayload,
+  buildSituationReportLine,
   buildStatusRows,
   classifyChecks,
   classifyConflictSet,
@@ -78,6 +79,33 @@ test('validateConfigObject accepts a production-ready target config', () => {
   const report = validateConfigObject({ targets: [validationTarget()] });
   assert.equal(report.ok, true);
   assert.deepEqual(report.errors, []);
+});
+
+test('validateConfigObject accepts dry-run OpenClaw reports and rejects unsafe report config', () => {
+  const dryRunReport = validateConfigObject({
+    targets: [validationTarget({ notify: { mode: 'openclaw', situationReportEveryMs: 0 } })],
+  });
+  assert.equal(dryRunReport.ok, true);
+
+  const liveWithoutCommand = validateConfigObject({
+    targets: [validationTarget({ notify: { mode: 'openclaw', dryRun: false } })],
+  });
+  assert.equal(liveWithoutCommand.ok, false);
+  assert.match(liveWithoutCommand.errors.join('\n'), /notify\.command is required/);
+
+  const secretBearing = validateConfigObject({
+    targets: [validationTarget({
+      notify: { mode: 'openclaw', dryRun: false, command: [process.execPath, '-e', ''], chatId: '123456' },
+    })],
+  });
+  assert.equal(secretBearing.ok, false);
+  assert.match(secretBearing.errors.join('\n'), /notify\.chatId must not be stored in config/);
+
+  const badCadence = validateConfigObject({
+    targets: [validationTarget({ notify: { mode: 'stdout', situationReportEveryMs: -1 } })],
+  });
+  assert.equal(badCadence.ok, false);
+  assert.match(badCadence.errors.join('\n'), /situationReportEveryMs must be a non-negative number/);
 });
 
 test('validateConfigObject rejects missing required fields, invalid push limits, and secrets', () => {
@@ -164,6 +192,109 @@ function writeFakeGh(binDir, pr) {
   writeFileSync(ghPath, `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(pr))});\n`);
   chmodSync(ghPath, 0o755);
 }
+
+test('buildSituationReportLine includes no-action next action for healthy PRs', () => {
+  const line = buildSituationReportLine(validationTarget(), {}, base, { kind: 'clean', checks: { failed: [], pending: [] } });
+  assert.match(line, /target=target-1/);
+  assert.match(line, /repo=owner\/repo/);
+  assert.match(line, /classification=clean/);
+  assert.match(line, /mergeable=MERGEABLE/);
+  assert.match(line, /mergeStateStatus=CLEAN/);
+  assert.match(line, /checks failed=0 pending=0/);
+  assert.match(line, /nextAction=none/);
+  assert.match(line, /현재 조치할 것 없음 \/ no action needed/);
+});
+
+test('check emits a full no-action situation report once per cadence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-situation-clean-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const hookPath = join(dir, 'hook.mjs');
+    const hookOutPath = join(dir, 'hook-output.jsonl');
+    writeFakeGh(fakeBin, base);
+    writeFileSync(hookPath, [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync(process.argv[2], JSON.stringify({",
+      '  message: process.env.PR_SHEPHERD_MESSAGE,',
+      '  kind: process.env.PR_SHEPHERD_KIND,',
+      '  key: process.env.PR_SHEPHERD_KEY,',
+      '  mode: process.env.PR_SHEPHERD_NOTIFY_MODE,',
+      '}) + "\\n");',
+      '',
+    ].join('\n'));
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: join(dir, 'missing-worktree'),
+        notify: { mode: 'command', command: [process.execPath, hookPath, hookOutPath], situationReportEveryMs: 3600000 },
+      })],
+    }));
+
+    for (let i = 0; i < 2; i += 1) {
+      const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check', '--config', configPath, '--target', 'target-1'], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: fakeBin },
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    const deliveries = readFileSync(hookOutPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(deliveries.length, 1);
+    assert.equal(deliveries[0].kind, 'situation');
+    assert.match(deliveries[0].key, /^situation:clean:/);
+    assert.equal(deliveries[0].mode, 'command');
+    assert.match(deliveries[0].message, /owner\/repo#1 situation report/);
+    assert.match(deliveries[0].message, /classification=clean/);
+    assert.match(deliveries[0].message, /checks failed=0 pending=0/);
+    assert.match(deliveries[0].message, /nextAction=none/);
+    assert.match(deliveries[0].message, /no action needed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('check can emit every healthy situation report when cadence is zero', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-situation-every-'));
+  try {
+    const fakeBin = join(dir, 'bin');
+    const statePath = join(dir, 'state.json');
+    const configPath = join(dir, 'config.json');
+    const hookPath = join(dir, 'hook.mjs');
+    const hookOutPath = join(dir, 'hook-output.jsonl');
+    writeFakeGh(fakeBin, base);
+    writeFileSync(hookPath, [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync(process.argv[2], process.env.PR_SHEPHERD_MESSAGE + '\\n');",
+      '',
+    ].join('\n'));
+    writeFileSync(configPath, JSON.stringify({
+      targets: [validationTarget({
+        statePath,
+        lockPath: join(dir, 'lock'),
+        worktreePath: join(dir, 'missing-worktree'),
+        notify: { mode: 'command', command: [process.execPath, hookPath, hookOutPath], situationReportEveryMs: 0 },
+      })],
+    }));
+
+    for (let i = 0; i < 2; i += 1) {
+      const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'check-canary', '--config', configPath, '--target', 'target-1'], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: fakeBin },
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+
+    const deliveries = readFileSync(hookOutPath, 'utf8').trim().split('\n');
+    assert.equal(deliveries.length, 2);
+    assert.match(deliveries[0], /no action needed/);
+    assert.match(deliveries[1], /no action needed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('canary command exercises command notifier hook without GitHub or state mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-canary-'));
