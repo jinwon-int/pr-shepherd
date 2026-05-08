@@ -782,6 +782,39 @@ test('classifyChecks treats success/skipped/neutral as non-failures', () => {
   assert.equal(c.pending.length, 0);
 });
 
+test('classifyChecks ignores stale duplicate cancelled checks resolved by same-name success', () => {
+  const c = classifyChecks([
+    { name: 'auto-response', status: 'COMPLETED', conclusion: 'CANCELLED', detailsUrl: 'https://example.invalid/cancelled' },
+    { name: 'auto-response', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://example.invalid/success' },
+  ]);
+  assert.equal(c.failed.length, 0);
+  assert.equal(c.pending.length, 0);
+  assert.equal(c.ignored.length, 1);
+  assert.equal(c.ignored[0].name, 'auto-response');
+});
+
+test('classifyChecks keeps unresolved cancelled checks actionable', () => {
+  const c = classifyChecks([
+    { name: 'auto-response', status: 'COMPLETED', conclusion: 'CANCELLED', detailsUrl: 'https://example.invalid/cancelled' },
+  ]);
+  assert.equal(c.failed.length, 1);
+  assert.equal(c.failed[0].name, 'auto-response');
+  assert.equal(c.pending.length, 0);
+});
+
+test('classifyPr treats mergeable clean PR as clean when duplicate cancelled check is resolved', () => {
+  const c = classifyPr({
+    ...base,
+    statusCheckRollup: [
+      { name: 'auto-response', status: 'COMPLETED', conclusion: 'CANCELLED' },
+      { name: 'auto-response', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    ],
+  });
+  assert.equal(c.kind, 'clean');
+  assert.equal(c.checks.failed.length, 0);
+  assert.equal(c.checks.ignored.length, 1);
+});
+
 test('automatic action planner fails closed for unknown, failed, and ungated dirty live states', () => {
   const target = validationTarget({ headOwner: 'contributor', baseOwner: 'owner' });
   const unknown = planAutomaticAction(target, {}, { ...base, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }, { kind: 'unknown', checks: { failed: [], pending: [] } });
