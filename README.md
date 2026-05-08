@@ -132,10 +132,12 @@ push budgets are notification-only outcomes that require human intervention.
 Automatic action planning is explicit and fail-closed. `check`/`check-canary` may refresh state and notify,
 `rehearse`/`repair --dry-run` records recent rehearsal evidence without branch mutation, and conflict handling
 plans either deterministic `autoSafe` repair or artifact/escalation. Live branch mutation is blocked unless
-`automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`, `approvedAt`,
-`approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
+target-level `automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`,
+`approvedAt`, `approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
 and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
-that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`.
+that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`. Live `repair` against multiple
+selected targets is blocked before GitHub/worktree access unless config-level `automaticActions.multiTargetLiveRepair`
+is enabled with `scope="multi-target-auto-safe-repair"`, approval metadata, and `targetIds` naming every selected target.
 
 ### Action-class executor operating procedure
 
@@ -330,6 +332,19 @@ Operational rules:
   context files.
 - A force push is only allowed through the existing per-target `--force-with-lease=<branch>:<head>`
   guard after the target's focused checks pass and the remote head is revalidated.
+
+Hardening checklist for fleet operators:
+
+- Treat `autoPushLimit24h`, recent repair failure keys, and notification cadence as per-target budgets.
+  A noisy or exhausted target should not suppress checks, summaries, or notifications for another PR.
+- Configure `staleLockMs` only after confirming the scheduler cannot leave legitimate long-running
+  repairs behind; stale-lock cleanup must be scoped to that target's lock file.
+- Rotate or archive state one target at a time. Before moving a state file, capture `status --target <id>`
+  so cooldowns, dedupe keys, and action-ledger entries are not lost accidentally.
+- Use `status --all` as the operator summary for mixed fleets: it should show each target's current
+  kind, failed/pending check counts, recent push budget, notification key, and action-ledger summary.
+- Keep live repair target-specific by default. If an operator approves a rare all-target live repair,
+  the approval record must name every covered target and branch before the command starts.
 
 ### Multi-target systemd patterns
 
