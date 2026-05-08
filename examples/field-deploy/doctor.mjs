@@ -20,6 +20,7 @@ const packageFiles = {
   fragment: resolve(here, 'openclaw-78261-notify.fragment.example.json'),
   decision: resolve(here, 'post-live-canary-decision.md'),
   liveReadiness: resolve(here, 'live-readiness-go-no-go.md'),
+  phaseAStandingOps: resolve(here, 'phase-a-standing-ops.md'),
 };
 
 function usage(exitCode = 1) {
@@ -154,6 +155,18 @@ function packageDoctor() {
     check(/runtime\/bootstrap context path in branch diff/i.test(liveReadiness), errors, 'live readiness package must include the branch diff contamination guard');
     check(/Do not paste file contents|do not paste file contents/i.test(liveReadiness), errors, 'live readiness package must block runtime context content disclosure');
     checks.push({ name: 'live-readiness-go-no-go', ok: true, path: relativeToRepo(packageFiles.liveReadiness) });
+  }
+
+  const phaseAStandingOps = readText(packageFiles.phaseAStandingOps, errors);
+  if (phaseAStandingOps) {
+    check(/check-canary\s+--config\s+<pr-shepherd-repo>\/config\.json\s+--target\s+<target-id>/.test(phaseAStandingOps), errors, 'Phase A standing ops must schedule check-canary for one target');
+    check(/PR_SHEPHERD_NOTIFY_DRY_RUN=1/.test(phaseAStandingOps), errors, 'Phase A standing ops must default to dry-run/no-send');
+    check(/24-48h observation/i.test(phaseAStandingOps), errors, 'Phase A standing ops must include the first 24-48h observation template');
+    check(/State and evidence rotation checklist/i.test(phaseAStandingOps), errors, 'Phase A standing ops must include state/evidence rotation guidance');
+    check(/One-shot live Telegram\/OpenClaw reporting canary/i.test(phaseAStandingOps), errors, 'Phase A standing ops must include the one-shot live reporting canary boundary');
+    check(/GO for Phase A check-only standing operations; NO-GO for production live repair unless separately approved/i.test(phaseAStandingOps), errors, 'Phase A standing ops must preserve the GO/NO-GO boundary');
+    check(!/\brepair\s+--|\brepair\b.*timer|force-with-lease=.*push/i.test(phaseAStandingOps), errors, 'Phase A standing ops must not schedule repair or live force pushes');
+    checks.push({ name: 'phase-a-standing-ops', ok: true, path: relativeToRepo(packageFiles.phaseAStandingOps) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);
