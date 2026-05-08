@@ -21,6 +21,9 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
 - `phase-a-standing-ops.md` — standing operations package for the scheduled check-only Phase A lane,
   including dry-run/no-send scheduling, state/evidence rotation, 24-48h observation, and one-shot live
   reporting canary boundaries.
+- `phase-b-observation-noise-control.md` — Phase B rollout guide for observation ledgers, 24-48h
+  classification summaries, duplicate/no-action cadence, concise operator reports, rollback, and Phase C
+  rehearsal criteria.
 
 ## Safe install sketch
 
@@ -126,6 +129,13 @@ One-shot live Telegram/OpenClaw reporting canary checklist:
 4. Run one manual `check-canary --target <id>` and wait for an operator-visible receipt.
 5. If the receipt is missing, duplicated, or routed incorrectly, switch back to dry-run, disable any live schedule,
    and post `Block`. A successful receipt may close as `Done` or support a review PR, but it still does not enable repair.
+
+## Phase B observation and noise control
+
+After the Phase A timer is stable, use `phase-b-observation-noise-control.md` to run the next check-only
+observation window. Phase B records classification frequency, last clean/warning state, notification cadence,
+and the next recommended action without enabling repair or branch mutation. Keep detailed evidence in the
+ledger/status output and keep Telegram/OpenClaw reports concise.
 
 ## Field doctor
 

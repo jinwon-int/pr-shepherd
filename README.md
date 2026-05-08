@@ -569,9 +569,9 @@ Example unit files are included but not installed:
 For Telegram/OpenClaw situation-report packaging, see `examples/field-deploy/`. It includes a
 no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*` environment values,
 a config `notify` fragment for full reports on every 10-minute check, a Phase A standing-operations
-runbook with state/evidence rotation and 24-48h observation templates, a final live-readiness
-GO/NO-GO package, and a reversible user-systemd canary install sketch. Keep the copied env file and
-Telegram routing/token files outside this repo.
+runbook with state/evidence rotation and 24-48h observation templates, a Phase B observation/noise-control
+rollout guide, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install sketch.
+Keep the copied env file and Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
 
