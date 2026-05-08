@@ -24,6 +24,7 @@ import {
   resolveChangelogConflict,
   selectTargets,
   summarizeActionLedger,
+  summarizeObservationLedger,
   validateConfigObject,
 } from './pr-shepherd.mjs';
 
@@ -199,6 +200,10 @@ test('validateConfigObject rejects missing required fields, invalid push limits,
   assert.match(report.errors.join('\n'), /targets\[0\]\.headBranch is required/);
   assert.match(report.errors.join('\n'), /autoPushLimit24h must be a positive number/);
   assert.match(report.errors.join('\n'), /secret-looking value in config\.targets\[0\]\.remotes\.origin/);
+
+  const observationReport = validateConfigObject({ targets: [validationTarget({ observation: { ledgerLimit: 0 } })] });
+  assert.equal(observationReport.ok, false);
+  assert.match(observationReport.errors.join('\n'), /observation\.ledgerLimit must be a positive integer/);
 });
 
 test('validateConfigObject rejects duplicate target ids and enabled state or lock paths', () => {
@@ -361,7 +366,27 @@ test('action ledger appends once and redacts secrets/private paths', () => {
   assert.equal(summarizeActionLedger(state.actionLedger).recent[0].approvalId, 'approval-ledger-1');
 });
 
-test('status command reads state files without network access and summarizes the action ledger', () => {
+test('observation ledger summarizes 24-48h frequency and recheck suggestions', () => {
+  const now = new Date('2026-05-08T12:00:00Z');
+  const summary = summarizeObservationLedger([
+    { at: '2026-05-08T11:00:00Z', kind: 'clean', actionClass: AUTOMATIC_ACTION_CLASSES.RECHECK, failedCount: 0, pendingCount: 0 },
+    { at: '2026-05-08T10:00:00Z', kind: 'unknown', actionClass: AUTOMATIC_ACTION_CLASSES.RECHECK, failedCount: 0, pendingCount: 0 },
+    { at: '2026-05-07T11:30:00Z', kind: 'failed', actionClass: AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE, failedCount: 2, pendingCount: 1 },
+    { at: '2026-05-05T11:00:00Z', kind: 'dirty', actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL, failedCount: 0, pendingCount: 0 },
+  ], now);
+
+  assert.equal(summary.entries, 4);
+  assert.equal(summary.last24h.total, 2);
+  assert.equal(summary.last24h.byKind.clean, 1);
+  assert.equal(summary.last24h.byKind.unknown, 1);
+  assert.equal(summary.last24h.recheckSuggested, 2);
+  assert.equal(summary.last48h.total, 3);
+  assert.equal(summary.last48h.byKind.failed, 1);
+  assert.equal(summary.last48h.failedChecksMax, 2);
+  assert.equal(summary.lastWarningKind, 'failed');
+});
+
+test('status command reads state files without network access and summarizes the action and observation ledgers', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-status-'));
   try {
     const statePath = join(dir, 'state.json');
@@ -389,6 +414,17 @@ test('status command reads state files without network access and summarizes the
         approval: { id: 'approval-status-1', approvedBy: 'operator', scope: 'auto-safe-repair' },
         repairKey: 'repair:head-a:base-a:CONFLICTING:DIRTY',
       }],
+      observationLedger: [{
+        at: '2026-05-08T06:00:00Z',
+        kind: 'failed',
+        actionClass: AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE,
+        failedCount: 1,
+        pendingCount: 1,
+      }],
+      lastWarningAt: '2026-05-08T06:00:00Z',
+      lastWarningKind: 'failed',
+      lastDoctorWarnings: ['failed checks observed 1 times in 48h; operator review required before rehearsal'],
+      nextRecommendedAction: 'operator review failed checks; keep branch mutation disabled',
     }));
     writeFileSync(configPath, JSON.stringify({
       targets: [validationTarget({ statePath, lockPath: join(dir, 'lock'), worktreePath: join(dir, 'worktree') })],
@@ -410,6 +446,12 @@ test('status command reads state files without network access and summarizes the
     assert.equal(status.actionLedger.count, 1);
     assert.equal(status.actionLedger.recent[0].approvalId, 'approval-status-1');
     assert.equal(status.actionLedger.recent[0].result, 'failed');
+    assert.equal(status.observationSummary.entries, 1);
+    assert.equal(status.observationSummary.last48h.byKind.failed, 1);
+    assert.equal(status.recentRunAt, '2026-05-08T06:00:00Z');
+    assert.equal(status.lastWarningKind, 'failed');
+    assert.deepEqual(status.doctorWarnings, ['failed checks observed 1 times in 48h; operator review required before rehearsal']);
+    assert.equal(status.nextRecommendedAction, 'operator review failed checks; keep branch mutation disabled');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -467,8 +509,17 @@ test('check --all emits one mixed-target summary and keeps per-target state isol
       ['target-1', true, 'clean'],
       ['target-2', true, 'failed'],
     ]);
-    assert.equal(JSON.parse(readFileSync(statePath1, 'utf8')).lastSeenHeadOid, 'abc123');
-    assert.equal(JSON.parse(readFileSync(statePath2, 'utf8')).lastSeenHeadOid, 'def456');
+    const state1 = JSON.parse(readFileSync(statePath1, 'utf8'));
+    const state2 = JSON.parse(readFileSync(statePath2, 'utf8'));
+    assert.equal(state1.lastSeenHeadOid, 'abc123');
+    assert.equal(state2.lastSeenHeadOid, 'def456');
+    assert.equal(state1.observationLedger.length, 1);
+    assert.equal(state1.observationSummary.last48h.byKind.clean, 1);
+    assert.equal(state1.nextRecommendedAction, 'continue check-only observation until 24-48h stable, then consider Phase C rehearsal criteria');
+    assert.equal(state2.observationLedger.length, 1);
+    assert.equal(state2.observationSummary.last48h.byKind.failed, 1);
+    assert.equal(state2.lastWarningKind, 'failed');
+    assert.match(state2.lastDoctorWarnings.join('\n'), /failed checks observed 1 times in 48h/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

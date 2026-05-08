@@ -105,16 +105,19 @@ State and evidence rotation checklist:
 - Re-run the contamination guard before publishing evidence. Block if any branch diff or artifact path is
   `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`.
 
-First 24-48h observation template:
+Phase B 24-48h observation template:
 
 - Target id / config revision:
 - Scheduler command and cadence:
 - Run window start/end:
-- Interval 1 result: classification, notification key, state write, lock behavior:
-- Interval 2 result: classification, notification key, state write, lock behavior:
-- Noise check: duplicate or missing notifications:
+- `status --target <id>` closeout: `recentRunAt`, `lastCleanAt`, `lastWarningAt`, `lastWarningKind`:
+- `observationSummary.last24h`: total, clean, unknown, failed, dirty, recheckSuggested:
+- `observationSummary.last48h`: total, clean, unknown, failed, dirty, recheckSuggested:
+- Doctor warnings / next recommended action:
+- Noise check: duplicate no-action notifications are suppressed until cadence is due; escalations are specific and actionable:
 - Hygiene check: no secrets, chat ids, private paths, raw session dumps, or runtime/bootstrap context paths:
-- Decision: `promote-check-only`, `extend-observation`, or `rollback`:
+- Phase C rehearsal criteria: at least 24h of readable state, no unresolved doctor warnings, no duplicate/missing notifications, and an operator decision for one-shot `rehearse` only:
+- Decision: `promote-check-only`, `extend-observation`, `phase-c-one-shot-rehearsal`, or `rollback`:
 - Operator and ledger closeout URL:
 
 One-shot live Telegram/OpenClaw reporting canary checklist:

@@ -77,8 +77,12 @@ Record this in the operator issue or incident log; keep entries short and link t
 | T+0 manual run | `check-canary` JSON summary, notification dry-run output, no repair command | `pass` / `block` |
 | T+10m first scheduled run | one state update, no duplicate notification, no lock contention | `pass` / `block` |
 | T+30m | stable classification or clear operator action, no state write errors | `pass` / `block` |
-| T+24h | cadence acceptable, notification dedupe working, evidence redacted | `promote` / `extend` / `rollback` |
-| T+48h | if still clean, approve additional check-only targets or aggregate monitor | `promote` / `extend` / `rollback` |
+| T+24h | `status --target` shows `observationSummary.last24h`, `lastCleanAt`, `lastWarningAt`, doctor warnings, and redacted evidence | `promote` / `extend` / `rollback` |
+| T+48h | `observationSummary.last48h` confirms clean/unknown/recheck/failed/dirty frequency is understood before Phase C | `promote` / `extend` / `phase-c-one-shot-rehearsal` / `rollback` |
+
+For Phase B noise control, use the concise `status`/notification summary for Telegram or issue closeout and keep the
+bounded `observationLedger` state file as detailed evidence. Duplicate no-action reports should stay cadence-limited;
+failed, dirty, or repeated unknown observations should produce a specific `doctorWarnings` entry and remain check-only.
 
 Block promotion if any evidence contains secrets, private host paths, runtime/bootstrap context contents, raw session
 dumps, unexplained state corruption, lock contention that overlaps legitimate runs, or any scheduled repair command.
