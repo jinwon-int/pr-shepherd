@@ -258,6 +258,37 @@ Rollback is intentionally simple and non-destructive:
 4. Keep live `repair` disabled and leave worktrees untouched. A rollback must not rebase, write conflict
    artifacts, or push branches.
 
+### Operator doctor procedure
+
+Use the doctor procedure when installing PR Shepherd on a new host, after changing `config.json`, or when
+the scheduler/notifier looks unhealthy. It is a read-only health check sequence assembled from existing
+commands; it is not approval to run `repair`.
+
+Run the checks in this order and save only sanitized summaries:
+
+```bash
+node pr-shepherd.mjs validate --config config.json
+node pr-shepherd.mjs status --config config.json --all
+node pr-shepherd.mjs canary --config config.json --target <id>
+node pr-shepherd.mjs check-canary --config config.json --target <id>
+```
+
+Doctor pass criteria:
+
+- `validate` exits successfully with no unsafe target, notifier, path, duplicate lock/state, or secret-looking
+  config findings.
+- `status --all` can read every enabled target state file or clearly reports the missing state for a first run.
+- `canary` renders the notifier payload without contacting GitHub, writing target state, touching a worktree,
+  or sending live Telegram/OpenClaw traffic unless a check-only live activation is already approved.
+- `check-canary` can read the selected GitHub PR, update only that target's state/lock files, and emit at most
+  one deduplicated situation report.
+
+If any doctor step fails, stop the rollout, keep timers disabled, and post `Block` with the failing command,
+target id, exit code, and sanitized log link. Do not attach raw shell transcripts. Before sharing doctor evidence
+or creating a PR from a field run, verify that no branch diff or artifact bundle includes secrets, private host
+paths, or OpenClaw runtime/bootstrap context paths such as `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`,
+`HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`; path names are enough for a block report.
+
 ## Status classification
 
 - `merged`: `mergedAt` exists or state is `MERGED`; notify once and disable.

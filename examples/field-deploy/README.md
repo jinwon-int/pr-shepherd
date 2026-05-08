@@ -54,6 +54,23 @@ node pr-shepherd.mjs canary --config config.json --target openclaw-78261
 node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
 ```
 
+## Field doctor
+
+When a copied unit, wrapper, or config change behaves unexpectedly, run the same read-only doctor sequence
+manually before enabling the timer again:
+
+```bash
+node pr-shepherd.mjs validate --config config.json
+node pr-shepherd.mjs status --config config.json --target openclaw-78261
+node pr-shepherd.mjs canary --config config.json --target openclaw-78261
+node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
+```
+
+A field doctor result is healthy only when validation passes, the target state is readable or explicitly absent
+for a first run, the wrapper stays no-send unless live check-only reporting was approved, and no log/evidence
+contains secrets, private host paths, or OpenClaw runtime/bootstrap context paths. If any check fails, keep the
+timer disabled and record `Block` with the sanitized failing command and target id.
+
 ## First live canary boundary
 
 Live Telegram/OpenClaw delivery is a one-shot operator action, not part of tests. Delivery goes through the OpenClaw CLI so OpenClaw owns Telegram routing, allowlists, and provider credentials. After the dry-run smoke is approved, set config `notify.dryRun=false` only with `notify.liveActivation.scope="check-only-reporting"`, `approvedAt`, and `approvedBy`; keep live `situationReportEveryMs` at one hour or more. Set env `PR_SHEPHERD_NOTIFY_DRY_RUN=0`, confirm `PR_SHEPHERD_OPENCLAW_TARGET` is operator-managed, then run one manual `check-canary` and switch back to dry-run if the operator-visible receipt is not confirmed. This is check-only reporting approval, not repair or push approval.
