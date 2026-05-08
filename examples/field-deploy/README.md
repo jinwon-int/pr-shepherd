@@ -21,6 +21,9 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
 - `phase-a-standing-ops.md` — standing operations package for the scheduled check-only Phase A lane,
   including dry-run/no-send scheduling, state/evidence rotation, 24-48h observation, and one-shot live
   reporting canary boundaries.
+- `phase-b-observation-noise-control.md` — Phase B rollout guide for observation ledgers, 24-48h
+  classification summaries, duplicate/no-action cadence, concise operator reports, rollback, and Phase C
+  rehearsal criteria.
 
 ## Safe install sketch
 
@@ -105,16 +108,19 @@ State and evidence rotation checklist:
 - Re-run the contamination guard before publishing evidence. Block if any branch diff or artifact path is
   `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`.
 
-First 24-48h observation template:
+Phase B 24-48h observation template:
 
 - Target id / config revision:
 - Scheduler command and cadence:
 - Run window start/end:
-- Interval 1 result: classification, notification key, state write, lock behavior:
-- Interval 2 result: classification, notification key, state write, lock behavior:
-- Noise check: duplicate or missing notifications:
+- `status --target <id>` closeout: `recentRunAt`, `lastCleanAt`, `lastWarningAt`, `lastWarningKind`:
+- `observationSummary.last24h`: total, clean, unknown, failed, dirty, recheckSuggested:
+- `observationSummary.last48h`: total, clean, unknown, failed, dirty, recheckSuggested:
+- Doctor warnings / next recommended action:
+- Noise check: duplicate no-action notifications are suppressed until cadence is due; escalations are specific and actionable:
 - Hygiene check: no secrets, chat ids, private paths, raw session dumps, or runtime/bootstrap context paths:
-- Decision: `promote-check-only`, `extend-observation`, or `rollback`:
+- Phase C rehearsal criteria: at least 24h of readable state, no unresolved doctor warnings, no duplicate/missing notifications, and an operator decision for one-shot `rehearse` only:
+- Decision: `promote-check-only`, `extend-observation`, `phase-c-one-shot-rehearsal`, or `rollback`:
 - Operator and ledger closeout URL:
 
 One-shot live Telegram/OpenClaw reporting canary checklist:
@@ -126,6 +132,13 @@ One-shot live Telegram/OpenClaw reporting canary checklist:
 4. Run one manual `check-canary --target <id>` and wait for an operator-visible receipt.
 5. If the receipt is missing, duplicated, or routed incorrectly, switch back to dry-run, disable any live schedule,
    and post `Block`. A successful receipt may close as `Done` or support a review PR, but it still does not enable repair.
+
+## Phase B observation and noise control
+
+After the Phase A timer is stable, use `phase-b-observation-noise-control.md` to run the next check-only
+observation window. Phase B records classification frequency, last clean/warning state, notification cadence,
+and the next recommended action without enabling repair or branch mutation. Keep detailed evidence in the
+ledger/status output and keep Telegram/OpenClaw reports concise.
 
 ## Field doctor
 

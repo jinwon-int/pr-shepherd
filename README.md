@@ -69,10 +69,15 @@ Commands that require operator approval:
 
 Roll out in this order: validate the config, run a local notifier canary, run one manual `check-canary`, install
 one check-only timer for one target, observe at least two intervals, then add more check-only targets. Promotion
-never grants repair approval; repair remains a separate one-shot decision.
+never grants repair approval; repair remains a separate one-shot decision. Check-only runs append a bounded
+`observationLedger` in the target state and keep a 24h/48h `observationSummary` so operators can see clean,
+unknown/recheck, failed, and dirty frequency without branch mutation or raw log attachment.
 
 Rollback is non-destructive: disable the scheduler, run `status` for final evidence, keep or move aside state for
-audit, and leave repair/worktrees untouched. Do not rebase, write artifacts, or push as part of rollback.
+audit, and leave repair/worktrees untouched. Do not rebase, write artifacts, or push as part of rollback. `status`
+and `status --all` are the preferred observation closeout views because they include `recentRunAt`, `lastCleanAt`,
+`lastWarningAt`/`lastWarningKind`, `doctorWarnings`, and `nextRecommendedAction` in addition to the sanitized
+observation/action summaries.
 
 Approval and evidence boundaries are fail-closed. Logs, notifications, PR comments, and artifacts should identify
 the command, target id, operator approval, and result, but must not include secrets, private host paths, or
@@ -569,9 +574,9 @@ Example unit files are included but not installed:
 For Telegram/OpenClaw situation-report packaging, see `examples/field-deploy/`. It includes a
 no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*` environment values,
 a config `notify` fragment for full reports on every 10-minute check, a Phase A standing-operations
-runbook with state/evidence rotation and 24-48h observation templates, a final live-readiness
-GO/NO-GO package, and a reversible user-systemd canary install sketch. Keep the copied env file and
-Telegram routing/token files outside this repo.
+runbook with state/evidence rotation and 24-48h observation templates, a Phase B observation/noise-control
+rollout guide, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install sketch.
+Keep the copied env file and Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
 
