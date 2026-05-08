@@ -309,6 +309,41 @@ Notifier hook requirements:
 - Prefer a small wrapper script when routing to chat/email/webhooks so credentials stay outside
   `config.json` and can be managed by the host service environment.
 
+### Telegram/OpenClaw reporting rollout
+
+Use the `command` notifier as the boundary between PR Shepherd and Telegram/OpenClaw delivery. The
+wrapper should accept the `PR_SHEPHERD_*` environment variables above, render one concise operator
+message, and hand it to OpenClaw or Telegram using credentials supplied by the service environment.
+Do not put bot tokens, chat ids, webhook URLs with credentials, or local operator paths in
+`config.json`, state files, logs, or PR artifacts.
+
+Recommended rollout:
+
+1. Keep `notify.mode=stdout` in production and run `validate` plus one manual
+   `check-canary --target <id>` to capture the baseline message text.
+2. Install the Telegram/OpenClaw wrapper outside this repository and verify it with a synthetic
+   `canary --target <id>` run before it can contact GitHub or touch PR state.
+3. Switch only the canary target to `notify.mode=command` with the wrapper argv. Keep the timer on
+   `check-canary --target <id>` and use read-only GitHub credentials.
+4. Observe at least two scheduled intervals. Confirm one notification per state change, no duplicate
+   Telegram/OpenClaw messages, stable dedupe keys in the target state file, and no hook failures in
+   scheduler logs.
+5. Promote additional check-only targets one at a time. Live `repair` remains disabled until a
+   separate operator approval, rehearsal, focused checks, and force-with-lease push gate are complete.
+
+Rollback:
+
+1. Disable the Telegram/OpenClaw wrapper first by switching the affected target back to
+   `notify.mode=stdout` or `none`, then run `validate`.
+2. Disable or pause the scheduler if messages are still being emitted, for example the relevant
+   systemd timer or OpenClaw cron schedule.
+3. Run `status --target <id>` and save the final JSON summary with scheduler and wrapper logs as
+   rollback evidence. Redact secrets and confirm the evidence does not include private host paths or
+   OpenClaw runtime/bootstrap context paths.
+4. Leave the target state file in place unless a bad wrapper generated incorrect notification keys;
+   if reset is required, move the old state file aside for audit rather than deleting it.
+5. Re-enable check-only reporting with `stdout` until the wrapper is fixed and a new canary passes.
+
 ## Suggested timer
 
 Run `check` every 5-10 minutes. Run `repair --dry-run` or live `repair` only after the worktree is prepared and operator policy is confirmed.
