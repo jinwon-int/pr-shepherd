@@ -41,7 +41,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/repair.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/repair/rehearse.`);
   process.exit(exitCode);
 }
 
@@ -52,7 +52,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'canary', 'check', 'repair'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'repair', 'rehearse'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -78,6 +78,10 @@ function parseArgs(argv) {
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!args.config) usage();
+  if (args.cmd === 'rehearse') {
+    args.dryRun = true;
+    if (args.allowCodeAssistedPush) throw new Error('rehearse is dry-run only; --allow-code-assisted-push is not allowed');
+  }
   if (args.allTargets && args.targetSelectors.length > 0) throw new Error('--all cannot be combined with --target');
   return args;
 }
@@ -852,7 +856,7 @@ function handleRepair(target, dryRun, opts = {}) {
 }
 
 function handleTargetCommand(target, args) {
-  if (args.cmd === 'check') return handleCheck(target);
+  if (args.cmd === 'check' || args.cmd === 'check-canary') return handleCheck(target);
   return handleRepair(target, args.dryRun, args);
 }
 
@@ -900,5 +904,10 @@ export function main(argv = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  main();
+  try {
+    main();
+  } catch (err) {
+    console.error(redact(err.message));
+    process.exitCode = 1;
+  }
 }

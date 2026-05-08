@@ -6,9 +6,10 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=<pr-shepherd-repo>
-ExecStart=/usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs check --config <pr-shepherd-repo>/config.json --target %i
-# Keep repair out of timers. Run repair manually only after explicit operator approval:
-# /usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs repair --config <pr-shepherd-repo>/config.json --target %i --dry-run
+ExecStart=/usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs check-canary --config <pr-shepherd-repo>/config.json --target %i
+# Keep repair out of timers. Rehearse manually first, then run live repair only after explicit operator approval:
+# /usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs rehearse --config <pr-shepherd-repo>/config.json --target %i
+# /usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs repair --config <pr-shepherd-repo>/config.json --target %i
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
