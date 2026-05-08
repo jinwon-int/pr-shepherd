@@ -1151,6 +1151,12 @@ test('automatic action planner records rehearsal before permitting gated live re
         approvedBy: 'operator',
         branchAllowlist: ['feature'],
         rehearsalMaxAgeMs: 10000,
+        targetId: 'target-1',
+        pr: 'owner/repo#1',
+        headRefOid: 'abc123',
+        baseRefOid: 'base-a',
+        repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+        rollbackNote: 'disable live repair after the one-shot run',
       },
     },
   });
@@ -1164,6 +1170,12 @@ test('automatic action planner records rehearsal before permitting gated live re
   assert.equal(missingRehearsal.allowed, false);
   assert.match(missingRehearsal.reasons.join('\n'), /rehearsal evidence is required/);
 
+  const approvalPackage = buildRepairRehearsalApprovalPackage(target, pr, {}, rehearsal, {
+    now: new Date(1000),
+    repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+    baseOid: 'base-a',
+    classification: 'dirty',
+  });
   const state = {
     lastRepairRehearsal: {
       at: new Date(1000).toISOString(),
@@ -1171,7 +1183,13 @@ test('automatic action planner records rehearsal before permitting gated live re
       repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
       headRefOid: 'abc123',
       baseOid: 'base-a',
+      approvalPackage,
     },
+    actionLedger: [{
+      actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL,
+      result: 'rehearsed',
+      repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+    }],
   };
   const live = planAutomaticAction(target, state, pr, classification, { dryRun: false, now: 2000 });
   assert.equal(live.actionClass, AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR);
