@@ -137,6 +137,29 @@ plans either deterministic `autoSafe` repair or artifact/escalation. Live branch
 and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
 that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`.
 
+### Action-class executor operating procedure
+
+Treat the action-class executor as a narrow dispatch layer from a recorded plan to a single approved effect:
+
+1. Build or load the automatic action plan first; do not choose handlers from raw PR state. The plan's
+   `actionClass`, `allowed`, `pushAllowed`, `mutatesBranch`, `writesArtifact`, and `requiresOperatorApproval`
+   fields are the execution contract.
+2. If the plan is `block` or `allowed=false`, stop before invoking any handler. Record the blocked reasons and
+   post the terminal `Block` ledger marker when this is an operator-run task.
+3. Dispatch only to the handler registered for the exact action class:
+   - `recheck`: refresh state or retry ambiguous GitHub data; no branch or artifact mutation.
+   - `notify-escalate`: send the deduplicated operator notification only.
+   - `repair-rehearsal`: collect dry-run repair evidence and update rehearsal state; do not push.
+   - `conflict-artifact`: write sanitized conflict evidence for operator review; do not push.
+   - `auto-safe-repair`: run only after live repair approval gates pass, focused checks pass, and the
+     expected remote head is still protected by `--force-with-lease`.
+   - `block`: terminal policy denial; no handler should mutate anything.
+4. Before any handler writes an artifact or mutates a branch, run the contamination check for the planned diff
+   and evidence bundle. Fail closed if OpenClaw runtime/bootstrap context paths would be included.
+5. Append a sanitized `actionLedger` entry with the action class, target, approval metadata, expected refs or
+   repair key, result, and evidence links. Do not store raw shell transcripts, secrets, private host paths, or
+   runtime/bootstrap context file contents.
+
 When preparing code-assisted patches for this repository, also keep OpenClaw runtime/bootstrap context
 out of branch diffs and evidence. Fail closed before PR creation if any of these repo-relative paths
 would be committed or attached: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
