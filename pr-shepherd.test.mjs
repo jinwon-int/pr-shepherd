@@ -87,11 +87,62 @@ test('validateConfigObject accepts dry-run OpenClaw reports and rejects unsafe r
   });
   assert.equal(dryRunReport.ok, true);
 
+  const liveReport = validateConfigObject({
+    targets: [validationTarget({
+      notify: {
+        mode: 'openclaw',
+        dryRun: false,
+        command: [process.execPath, '--version'],
+        situationReportEveryMs: 3600000,
+        liveActivation: {
+          scope: 'check-only-reporting',
+          approvedAt: '2026-05-08T04:00:00Z',
+          approvedBy: 'operator',
+        },
+      },
+    })],
+  });
+  assert.equal(liveReport.ok, true);
+
   const liveWithoutCommand = validateConfigObject({
     targets: [validationTarget({ notify: { mode: 'openclaw', dryRun: false } })],
   });
   assert.equal(liveWithoutCommand.ok, false);
   assert.match(liveWithoutCommand.errors.join('\n'), /notify\.command is required/);
+  assert.match(liveWithoutCommand.errors.join('\n'), /notify\.liveActivation is required/);
+
+  const liveEveryCheck = validateConfigObject({
+    targets: [validationTarget({
+      notify: {
+        mode: 'openclaw',
+        dryRun: false,
+        command: [process.execPath, '--version'],
+        situationReportEveryMs: 0,
+        liveActivation: {
+          scope: 'check-only-reporting',
+          approvedAt: '2026-05-08T04:00:00Z',
+          approvedBy: 'operator',
+        },
+      },
+    })],
+  });
+  assert.equal(liveEveryCheck.ok, false);
+  assert.match(liveEveryCheck.errors.join('\n'), /situationReportEveryMs must be at least 3600000/);
+
+  const badLiveActivation = validateConfigObject({
+    targets: [validationTarget({
+      notify: {
+        mode: 'openclaw',
+        dryRun: false,
+        command: [process.execPath, '--version'],
+        liveActivation: { scope: 'repair', approvedAt: 'not-a-date', approvedBy: '' },
+      },
+    })],
+  });
+  assert.equal(badLiveActivation.ok, false);
+  assert.match(badLiveActivation.errors.join('\n'), /liveActivation\.scope must be check-only-reporting/);
+  assert.match(badLiveActivation.errors.join('\n'), /liveActivation\.approvedAt must be an ISO-8601 timestamp/);
+  assert.match(badLiveActivation.errors.join('\n'), /liveActivation\.approvedBy is required/);
 
   const secretBearing = validateConfigObject({
     targets: [validationTarget({
