@@ -19,6 +19,7 @@ const packageFiles = {
   timer: resolve(here, 'pr-shepherd-check-canary@.timer.example'),
   fragment: resolve(here, 'openclaw-78261-notify.fragment.example.json'),
   decision: resolve(here, 'post-live-canary-decision.md'),
+  liveReadiness: resolve(here, 'live-readiness-go-no-go.md'),
 };
 
 function usage(exitCode = 1) {
@@ -144,6 +145,15 @@ function packageDoctor() {
     check(/check-only/i.test(decision), errors, 'decision record must preserve check-only activation language');
     check(/Do not enable aggregate reporting, additional targets, or any `repair` command/i.test(decision), errors, 'decision record must block repair under the live canary decision');
     checks.push({ name: 'decision-record', ok: true, path: relativeToRepo(packageFiles.decision) });
+  }
+
+  const liveReadiness = readText(packageFiles.liveReadiness, errors);
+  if (liveReadiness) {
+    check(/GO\/NO-GO/i.test(liveReadiness), errors, 'live readiness package must name the operator GO/NO-GO decision');
+    check(/`Start`/.test(liveReadiness) && /`PR: <url>`/.test(liveReadiness) && /`Done`/.test(liveReadiness) && /`Block`/.test(liveReadiness), errors, 'live readiness package must preserve Start and terminal ledger markers');
+    check(/runtime\/bootstrap context path in branch diff/i.test(liveReadiness), errors, 'live readiness package must include the branch diff contamination guard');
+    check(/Do not paste file contents|do not paste file contents/i.test(liveReadiness), errors, 'live readiness package must block runtime context content disclosure');
+    checks.push({ name: 'live-readiness-go-no-go', ok: true, path: relativeToRepo(packageFiles.liveReadiness) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);

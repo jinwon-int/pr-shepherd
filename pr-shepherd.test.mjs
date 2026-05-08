@@ -228,6 +228,22 @@ test('validateConfigObject rejects duplicate conflict paths across policy tiers'
   assert.match(report.errors.join('\n'), /duplicates CHANGELOG\.md across tiers: autoSafe, codeAssisted/);
 });
 
+test('validateConfigObject rejects non-repo and OpenClaw runtime conflict policy paths', () => {
+  const report = validateConfigObject({
+    targets: [validationTarget({
+      conflictPolicy: {
+        autoSafe: [{ path: 'AGENTS.md', resolver: 'merge-changelog-top-entry', needle: 'Release note' }],
+        codeAssisted: ['/private/worktree/src/example.ts'],
+        humanOnly: ['.openclaw/workspace-state.json'],
+      },
+    })],
+  });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /autoSafe\[0\]\.path must not reference OpenClaw runtime\/bootstrap context paths: AGENTS\.md/);
+  assert.match(report.errors.join('\n'), /codeAssisted\[0\] must be repo-relative and must not contain \.\./);
+  assert.match(report.errors.join('\n'), /humanOnly\[0\] must not reference OpenClaw runtime\/bootstrap context paths: \.openclaw\/workspace-state\.json/);
+});
+
 test('validateConfigObject requires explicit live auto-repair gates when enabled', () => {
   const bad = validateConfigObject({ targets: [validationTarget({ automaticActions: { liveRepair: { enabled: true } } })] });
   assert.equal(bad.ok, false);
@@ -677,6 +693,7 @@ test('field deployment doctor package is read-only and validates check-only cana
     assert.deepEqual(report.errors, []);
     assert.equal(report.reports.config.targets[0].target, 'openclaw-78261');
     assert.equal(report.reports.package.checks.some((check) => check.name === 'wrapper'), true);
+    assert.equal(report.reports.package.checks.some((check) => check.name === 'live-readiness-go-no-go'), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
