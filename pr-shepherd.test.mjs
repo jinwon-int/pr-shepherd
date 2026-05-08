@@ -677,6 +677,7 @@ test('field deployment doctor package is read-only and validates check-only cana
     assert.deepEqual(report.errors, []);
     assert.equal(report.reports.config.targets[0].target, 'openclaw-78261');
     assert.equal(report.reports.package.checks.some((check) => check.name === 'wrapper'), true);
+    assert.equal(report.reports.package.checks.some((check) => check.name === 'live-readiness-go-no-go'), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
