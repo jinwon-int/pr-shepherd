@@ -22,6 +22,7 @@ const packageFiles = {
   liveReadiness: resolve(here, 'live-readiness-go-no-go.md'),
   phaseAStandingOps: resolve(here, 'phase-a-standing-ops.md'),
   phaseDOperatorDecisionPacket: resolve(here, 'phase-d-operator-decision-packet.md'),
+  phaseFControlsPolicy: resolve(here, 'phase-f-fleet-safe-controls-limited-autonomy.md'),
 };
 
 function usage(exitCode = 1) {
@@ -179,6 +180,18 @@ function packageDoctor() {
     check(/`Start`/.test(phaseDOperatorDecisionPacket) && /`PR: <url>`/.test(phaseDOperatorDecisionPacket) && /`Done`/.test(phaseDOperatorDecisionPacket) && /`Block`/.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must preserve Start and terminal ledger markers');
     check(/AGENTS\.md/.test(phaseDOperatorDecisionPacket) && /\.openclaw\/\*\*/.test(phaseDOperatorDecisionPacket), errors, 'Phase D packet must include the runtime/bootstrap contamination guard');
     checks.push({ name: 'phase-d-operator-decision-packet', ok: true, path: relativeToRepo(packageFiles.phaseDOperatorDecisionPacket) });
+  }
+
+  const phaseFControlsPolicy = readText(packageFiles.phaseFControlsPolicy, errors);
+  if (phaseFControlsPolicy) {
+    check(/fleet-safe controls/i.test(phaseFControlsPolicy), errors, 'Phase F policy must name fleet-safe controls');
+    check(/limited autonomy/i.test(phaseFControlsPolicy), errors, 'Phase F policy must name limited autonomy');
+    check(/F0 observe-only/i.test(phaseFControlsPolicy) && /F3 one-shot live repair/i.test(phaseFControlsPolicy), errors, 'Phase F policy must define autonomy tiers through one-shot live repair');
+    check(/F4 prohibited/i.test(phaseFControlsPolicy), errors, 'Phase F policy must prohibit standing live repair automation');
+    check(/Phase D\/E/i.test(phaseFControlsPolicy) && /repair --target <id>/.test(phaseFControlsPolicy), errors, 'Phase F policy must keep live repair behind Phase D/E target-specific approval');
+    check(/AGENTS\.md/.test(phaseFControlsPolicy) && /\.openclaw\/\*\*/.test(phaseFControlsPolicy), errors, 'Phase F policy must include the runtime/bootstrap contamination guard');
+    check(/`Start`/.test(phaseFControlsPolicy) && /`PR: <url>`/.test(phaseFControlsPolicy) && /`Done`/.test(phaseFControlsPolicy) && /`Block`/.test(phaseFControlsPolicy), errors, 'Phase F policy must preserve Start and terminal ledger markers');
+    checks.push({ name: 'phase-f-fleet-safe-controls-limited-autonomy', ok: true, path: relativeToRepo(packageFiles.phaseFControlsPolicy) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);

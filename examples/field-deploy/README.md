@@ -28,6 +28,10 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   ledger markers, evidence hygiene, and the separate live repair approval boundary.
 - `phase-d-operator-decision-packet.md` — Phase D packet template for the final GO/NO-GO decision before one
   target-specific live repair, including approval metadata, evidence hygiene, and closeout markers.
+- `phase-e-execution-readiness-post-action-audit.md` — Phase E readiness and post-action audit runbook for one
+  operator-approved live repair.
+- `phase-f-fleet-safe-controls-limited-autonomy.md` — Phase F policy for fleet-safe controls, limited autonomy
+  tiers, expansion/rollback rules, and the standing prohibition on live repair automation.
 
 ## Safe install sketch
 
@@ -161,6 +165,20 @@ GO/NO-GO decision for one target-specific live repair. Phase D records the targe
 branch, expected refs, approval scope, focused checks, push budget, and contamination guard result before any
 `repair --target <id>` command may run. It closes with exactly one terminal marker: `PR: <url>`, `Done`, or
 `Block`; a GO decision is one-shot and never authorizes standing repair automation.
+
+## Phase E execution readiness and post-action audit
+
+Use `phase-e-execution-readiness-post-action-audit.md` only after a Phase D `GO` packet exists for one target.
+Phase E verifies readiness, runs the approved `repair --target <id>` at most once, and records the post-action
+audit. It does not create a standing repair lane or approve retries after drift.
+
+## Phase F fleet-safe controls and limited autonomy
+
+Use `phase-f-fleet-safe-controls-limited-autonomy.md` when more than one target or any standing scheduler needs a
+shared policy. Phase F defines autonomy tiers from F0 observe-only through F3 one-shot Phase D/E repair, with F4
+prohibited for standing live repair timers, aggregate live `repair --all`, unattended force-pushes, and automatic
+fleet expansion. Promote one target or one tier at a time, keep default live push budget at zero, and re-run the
+runtime/bootstrap contamination guard before evidence or PR closeout.
 
 ## Field doctor
 
