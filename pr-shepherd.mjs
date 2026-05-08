@@ -961,6 +961,94 @@ function repairPlanKey(pr = {}, baseOid = null) {
   return `repair:${pr.headRefOid || ''}:${baseOid || pr.baseRefOid || pr.baseRefName || ''}:${pr.mergeable || ''}:${pr.mergeStateStatus || ''}`;
 }
 
+function renderedCommand(command, target, opts = {}) {
+  const argv = [
+    'node',
+    'pr-shepherd.mjs',
+    command,
+    '--config',
+    '<config>',
+    '--target',
+    target.id || '<target-id>',
+  ];
+  if (opts.artifactDir) argv.push('--artifact-dir', '<artifact-dir>');
+  return argv;
+}
+
+export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state = {}, plan = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const baseOid = fields.baseOid || currentBaseOid(state, pr);
+  const repairKey = fields.repairKey || repairPlanKey(pr, baseOid);
+  const headBranch = target.headBranch || pr.headRefName || null;
+  const rehearsalCommand = renderedCommand('rehearse', target, fields);
+  const liveRepairCommand = renderedCommand('repair', target, fields);
+  const expectedRefs = {
+    headBranch,
+    baseBranch: target.baseBranch || pr.baseRefName || null,
+    headRefOid: pr.headRefOid || state.lastSeenHeadOid || null,
+    baseRefOid: baseOid || null,
+    repairKey,
+  };
+  const approvalText = [
+    `One-shot approval required before live repair for ${target.id || '<target-id>'} / ${target.pr || '<owner/repo#number>'}.`,
+    `Allowed command: ${liveRepairCommand.join(' ')}.`,
+    'Scope: auto-safe-repair.',
+    `Allowed head branch: ${headBranch || '<head-branch>'}.`,
+    `Expected head: ${expectedRefs.headRefOid || '<head-ref-oid>'}.`,
+    `Expected base: ${expectedRefs.baseRefOid || '<base-ref-oid>'}.`,
+    `Repair key: ${repairKey}.`,
+    'This approval is separate from rehearsal evidence and expires if any expected ref, branch, target, or repair key changes.',
+  ].join(' ');
+  const approvalPackage = {
+    schema: 'pr-shepherd-repair-rehearsal-approval/v1',
+    createdAt: now.toISOString(),
+    target: target.id || null,
+    pr: target.pr || null,
+    url: target.url || pr.url || null,
+    dryRunOnly: true,
+    productionMutation: false,
+    rehearsalCommand,
+    liveRepairCommand,
+    approvalText,
+    approvalConfigTemplate: {
+      automaticActions: {
+        liveRepair: {
+          enabled: true,
+          scope: 'auto-safe-repair',
+          approvalId: '<one-shot-approval-id>',
+          approvedAt: '<approval-iso8601>',
+          approvedBy: '<operator>',
+          branchAllowlist: headBranch ? [headBranch] : ['<head-branch>'],
+          rehearsalMaxAgeMs: DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS,
+        },
+      },
+    },
+    expectedRefs,
+    evidenceBundle: {
+      classification: fields.classification || plan.classification || null,
+      mergeable: pr.mergeable || state.lastMergeable || null,
+      mergeStateStatus: pr.mergeStateStatus || state.lastMergeStateStatus || null,
+      plannedAction: explainAutomaticActionPlan(plan),
+      requiredLedgerMarkers: ['Start', 'Approval before live repair', 'Action', 'Done/PR/Block'],
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    abortCriteria: [
+      'target id, PR number, head branch, expected head/base ref, or repair key changed',
+      'live repair approval metadata is missing, expired, wrong scope, or not target-specific',
+      'head branch is not listed in automaticActions.liveRepair.branchAllowlist',
+      'maintainer-owned head branch is detected without explicit allowMaintainerOwnedBranches=true',
+      'worktree is missing, dirty, stale, or has unexpected remotes',
+      'push budget is exhausted or the same repair key already failed',
+      'focused checks fail, GitHub reports failed checks, or PR is no longer dirty',
+      'remote head changes before push or force-with-lease cannot protect the expected head',
+      'conflicts are humanOnly/codeAssisted/unlisted or cannot be resolved by deterministic autoSafe policy',
+      'OpenClaw runtime/bootstrap context paths would enter the branch diff or artifact evidence',
+    ],
+    rollbackNote: 'Rehearsal only: no branch mutation, no push, and no force-with-lease. Roll back by keeping repair disabled and continuing check-only observation.',
+  };
+  return redactLedgerValue(approvalPackage, target);
+}
+
 function buildAutomaticActionPlan(actionClass, fields = {}) {
   const plan = {
     actionClass,
@@ -1569,6 +1657,13 @@ function handleRepair(target, dryRun, opts = {}) {
       const execution = executeAutomaticActionPlan(automaticPlan, {}, { dryRun: true });
       state.lastAutomaticActionExecution = execution;
       const now = new Date();
+      const approvalPackage = buildRepairRehearsalApprovalPackage(target, pr, state, automaticPlan, {
+        now,
+        repairKey: preRepairKey,
+        baseOid: currentBaseOid(state, pr),
+        classification: classification.kind,
+        artifactDir: opts.artifactDir,
+      });
       state.lastRepairRehearsal = {
         at: now.toISOString(),
         target: target.id,
@@ -1576,19 +1671,34 @@ function handleRepair(target, dryRun, opts = {}) {
         headRefOid: pr.headRefOid || null,
         baseOid: currentBaseOid(state, pr),
         classification: classification.kind,
+        approvalPackage,
       };
-      state.lastActionSummary = `dry-run/rehearsal stopped before git mutation at ${now.toISOString()}`;
+      state.lastActionSummary = `dry-run/rehearsal package ready at ${now.toISOString()}; no git mutation`;
       appendPlanLedgerEntry(state, target, automaticPlan, 'rehearsed', {
         repairKey: preRepairKey,
         expectedHeadOid: pr.headRefOid || null,
         expectedBaseOid: currentBaseOid(state, pr),
-        rollbackNote: 'dry-run only; no branch mutation',
+        rollbackNote: approvalPackage.rollbackNote,
+        details: {
+          approvalPackageSchema: approvalPackage.schema,
+          approvalText: approvalPackage.approvalText,
+          abortCriteria: approvalPackage.abortCriteria,
+          expectedRefs: approvalPackage.expectedRefs,
+        },
         now,
       });
       sendSituationReport(target, state, pr, classification, `situation:dry-run:${preRepairKey}`);
       saveJson(target.statePath, state);
       console.log(`[pr-shepherd:${target.id}] action ${execution.status}: ${execution.actionClass}; ${execution.reasons.join('; ')}`);
       console.log(`[pr-shepherd:${target.id}] dry-run stops before git mutation`);
+      console.log(JSON.stringify({
+        schema: approvalPackage.schema,
+        target: approvalPackage.target,
+        repairKey: approvalPackage.expectedRefs.repairKey,
+        approvalText: approvalPackage.approvalText,
+        abortCriteria: approvalPackage.abortCriteria,
+        rollbackNote: approvalPackage.rollbackNote,
+      }, null, 2));
       return;
     }
     if (!automaticPlan.allowed) {

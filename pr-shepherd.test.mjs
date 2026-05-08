@@ -8,6 +8,7 @@ import {
   AUTOMATIC_ACTION_CLASSES,
   appendActionLedgerEntry,
   buildConflictArtifactPayload,
+  buildRepairRehearsalApprovalPackage,
   buildSituationReportLine,
   buildStatusRows,
   classifyChecks,
@@ -33,6 +34,7 @@ const base = {
   state: 'OPEN',
   mergedAt: null,
   headRefOid: 'abc123',
+  baseRefOid: 'base123',
   mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN',
   statusCheckRollup: [],
@@ -886,6 +888,26 @@ test('check-canary rechecks transient UNKNOWN mergeability before reporting acti
   }
 });
 
+test('buildRepairRehearsalApprovalPackage renders target-specific approval evidence without mutation', () => {
+  const target = validationTarget({ pr: 'owner/repo#1', url: 'https://github.com/owner/repo/pull/1' });
+  const pr = { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
+  const plan = planAutomaticAction(target, {}, pr, { kind: 'dirty', checks: { failed: [], pending: [] } }, { dryRun: true, now: 1000 });
+  const pkg = buildRepairRehearsalApprovalPackage(target, pr, {}, plan, { now: new Date('2026-05-08T07:00:00Z'), classification: 'dirty' });
+
+  assert.equal(pkg.schema, 'pr-shepherd-repair-rehearsal-approval/v1');
+  assert.equal(pkg.dryRunOnly, true);
+  assert.equal(pkg.productionMutation, false);
+  assert.deepEqual(pkg.rehearsalCommand, ['node', 'pr-shepherd.mjs', 'rehearse', '--config', '<config>', '--target', 'target-1']);
+  assert.deepEqual(pkg.liveRepairCommand, ['node', 'pr-shepherd.mjs', 'repair', '--config', '<config>', '--target', 'target-1']);
+  assert.equal(pkg.expectedRefs.headRefOid, 'abc123');
+  assert.equal(pkg.expectedRefs.baseRefOid, 'base123');
+  assert.equal(pkg.expectedRefs.repairKey, 'repair:abc123:base123:CONFLICTING:DIRTY');
+  assert.match(pkg.approvalText, /One-shot approval required/);
+  assert.match(pkg.approvalText, /repair:abc123:base123:CONFLICTING:DIRTY/);
+  assert.match(pkg.abortCriteria.join('\n'), /runtime\/bootstrap context paths/);
+  assert.match(pkg.rollbackNote, /no branch mutation, no push/);
+});
+
 test('rehearse is an approval-gated dry-run repair alias that stops before git mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-rehearse-'));
   try {
@@ -910,12 +932,15 @@ test('rehearse is an approval-gated dry-run repair alias that stops before git m
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /action planned: repair-rehearsal/);
     assert.match(result.stdout, /dry-run stops before git mutation/);
+    assert.match(result.stdout, /pr-shepherd-repair-rehearsal-approval\/v1/);
     assert.equal(existsSync(missingWorktree), false);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.lastKind, 'dirty');
     assert.equal(state.lastMergeStateStatus, 'DIRTY');
     assert.equal(state.lastAutomaticActionExecution.status, 'planned');
     assert.equal(state.lastAutomaticActionExecution.actionClass, AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL);
+    assert.equal(state.lastRepairRehearsal.approvalPackage.schema, 'pr-shepherd-repair-rehearsal-approval/v1');
+    assert.equal(state.lastRepairRehearsal.approvalPackage.expectedRefs.repairKey, 'repair:abc123:base123:CONFLICTING:DIRTY');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
