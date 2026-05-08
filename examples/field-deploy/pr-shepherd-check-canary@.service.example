@@ -1,0 +1,15 @@
+[Unit]
+Description=PR Shepherd check-only Telegram/OpenClaw situation report (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=<pr-shepherd-repo>
+# Keep no-send as the service default. Put operator-owned OpenClaw routing in this env file.
+Environment=PR_SHEPHERD_NOTIFY_DRY_RUN=1
+EnvironmentFile=-%h/.config/pr-shepherd/%i.env
+ExecStart=/usr/bin/node <pr-shepherd-repo>/pr-shepherd.mjs check-canary --config <pr-shepherd-repo>/config.json --target %i
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

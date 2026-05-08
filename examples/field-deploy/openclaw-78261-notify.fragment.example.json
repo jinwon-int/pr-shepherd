@@ -1,0 +1,8 @@
+{
+  "notify": {
+    "mode": "openclaw",
+    "dryRun": true,
+    "command": ["/usr/local/bin/pr-shepherd-openclaw-telegram-notify"],
+    "situationReportEveryMs": 0
+  }
+}
