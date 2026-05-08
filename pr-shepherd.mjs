@@ -23,6 +23,7 @@ export const MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS = 60 * 60 * 1000;
 
 export const AUTOMATIC_ACTION_CLASSES = Object.freeze({
   RECHECK: 'recheck',
+  DIAGNOSE: 'diagnose',
   NOTIFY_ESCALATE: 'notify-escalate',
   REPAIR_REHEARSAL: 'repair-rehearsal',
   CONFLICT_ARTIFACT: 'conflict-artifact',
@@ -30,9 +31,18 @@ export const AUTOMATIC_ACTION_CLASSES = Object.freeze({
   BLOCK: 'block',
 });
 
+export const FLEET_TARGET_STATE_TIERS = Object.freeze([
+  'check-only',
+  'rehearsal-ready',
+  'phase-d-ready',
+  'live-approved-once',
+]);
+
 export const DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_ACTION_LEDGER_LIMIT = 50;
 export const DEFAULT_OBSERVATION_LEDGER_LIMIT = 288; // 48h at a 10-minute standing-ops cadence.
+export const DEFAULT_STRICT_VERIFY_REQUIRED = true;
+export const DEFAULT_INCIDENT_BLOCK_THRESHOLD = 3;
 export const PHASE_E_POST_ACTION_OUTCOMES = ['no-op', 'pushed', 'block'];
 
 const OBSERVATION_WARNING_KINDS = new Set(['dirty', 'failed', 'unknown']);
@@ -304,6 +314,7 @@ function validateAutomaticActions(errors, target, targetPath) {
   }
   if (liveRepair.requireRecentRehearsal !== undefined && typeof liveRepair.requireRecentRehearsal !== 'boolean') errors.push(`${livePath}.requireRecentRehearsal must be a boolean`);
   if (liveRepair.rehearsalMaxAgeMs !== undefined && (!Number.isFinite(Number(liveRepair.rehearsalMaxAgeMs)) || Number(liveRepair.rehearsalMaxAgeMs) <= 0)) errors.push(`${livePath}.rehearsalMaxAgeMs must be a positive number`);
+  if (liveRepair.strictVerifyRequired !== undefined && typeof liveRepair.strictVerifyRequired !== 'boolean') errors.push(`${livePath}.strictVerifyRequired must be a boolean`);
   if (liveRepair.allowMaintainerOwnedBranches !== undefined && typeof liveRepair.allowMaintainerOwnedBranches !== 'boolean') errors.push(`${livePath}.allowMaintainerOwnedBranches must be a boolean`);
 }
 
@@ -816,15 +827,90 @@ function assertMultiTargetLiveRepairAllowed(cfg, targets, args) {
   }
 }
 
+export function targetStateTier(target = {}, state = {}, now = Date.now()) {
+  const approval = liveRepairApprovalState(target, state, {}, now);
+  if (approval.state === 'unused') return 'live-approved-once';
+  if (state.lastRepairRehearsal?.approvalPackage?.schema === 'pr-shepherd-repair-rehearsal-approval/v1') return 'phase-d-ready';
+  if (state.lastKind === 'dirty' || state.lastWarningKind === 'dirty') return 'rehearsal-ready';
+  return 'check-only';
+}
+
+export function buildTargetIncidentSummary(target = {}, state = {}, observationSummary = null) {
+  const ledger = Array.isArray(state.actionLedger) ? state.actionLedger : [];
+  const recentBlocks = ledger.slice(-DEFAULT_INCIDENT_BLOCK_THRESHOLD).filter((entry) => ['blocked', 'failed'].includes(entry?.result));
+  const unknownCount = observationSummary?.last48h?.byKind?.unknown || 0;
+  const failedCount = observationSummary?.last48h?.byKind?.failed || 0;
+  const affectedTargets = [target.id || state.target].filter(Boolean);
+  if (recentBlocks.length >= DEFAULT_INCIDENT_BLOCK_THRESHOLD) {
+    return {
+      schema: 'pr-shepherd-incident-summary/v1',
+      incidentKind: 'repeated-repair-block',
+      severity: 'block',
+      affectedTargets,
+      repeatedCount: recentBlocks.length,
+      recommendedOperatorAction: 'keep target check-only; review approval, verify gate, expected refs, and last block reason before retrying repair',
+      safeRollbackOrDisableNote: 'disable automaticActions.liveRepair or let the one-shot approval expire; keep status/check paths enabled for visibility',
+      lastBlockReason: recentBlocks.at(-1)?.reasons?.[0] || recentBlocks.at(-1)?.details?.error || null,
+    };
+  }
+  if (unknownCount >= 3 || failedCount >= 3) {
+    return {
+      schema: 'pr-shepherd-incident-summary/v1',
+      incidentKind: unknownCount >= 3 ? 'repeated-unknown' : 'repeated-failed-checks',
+      severity: 'warning',
+      affectedTargets,
+      repeatedCount: Math.max(unknownCount, failedCount),
+      recommendedOperatorAction: unknownCount >= 3 ? 'recheck GitHub mergeability and keep repair disabled' : 'review failing checks before any rehearsal or approval',
+      safeRollbackOrDisableNote: 'no rollback needed; check/status remains read-only and branch mutation stays disabled',
+      lastBlockReason: null,
+    };
+  }
+  return null;
+}
+
+export function buildFleetOperatorBrief(rows = []) {
+  const counts = Object.fromEntries(FLEET_TARGET_STATE_TIERS.map((tier) => [tier, 0]));
+  const byKind = {};
+  const affectedTargets = [];
+  for (const row of rows) {
+    const tier = FLEET_TARGET_STATE_TIERS.includes(row?.targetTier) ? row.targetTier : 'check-only';
+    counts[tier] += 1;
+    const kind = row?.lastKind || row?.kind || 'unknown';
+    byKind[kind] = (byKind[kind] || 0) + 1;
+    if (row?.incident) affectedTargets.push(row.target);
+  }
+  const blockedCount = rows.filter((row) => row?.automaticAction?.status === 'blocked' || row?.incident?.severity === 'block').length;
+  const warningCount = rows.filter((row) => (Array.isArray(row?.doctorWarnings) && row.doctorWarnings.length > 0) || row?.incident?.severity === 'warning').length;
+  return {
+    schema: 'pr-shepherd-fleet-operator-brief/v1',
+    targets: rows.length,
+    tiers: counts,
+    byKind,
+    cleanCount: byKind.clean || 0,
+    warningCount,
+    blockedCount,
+    approvalReadyCount: counts['phase-d-ready'],
+    liveApprovedOnceCount: counts['live-approved-once'],
+    affectedTargets,
+    liveSendsDefault: 'disabled-or-dry-run',
+  };
+}
+
 export function buildStatusRows(targets, now = Date.now()) {
   const summaryNow = new Date(now);
   return targets.map((target) => {
     const stateFile = target.statePath && existsSync(target.statePath) ? loadJson(target.statePath, {}) : {};
     const state = { ...defaultState(target), ...stateFile };
     const observationSummary = state.observationSummary || summarizeObservationLedger(state.observationLedger || [], summaryNow);
+    const incident = buildTargetIncidentSummary(target, state, observationSummary);
+    const targetTier = targetStateTier(target, state, Number(summaryNow));
     return {
       target: target.id,
       pr: target.pr,
+      targetTier,
+      verifyGate: buildVerifyGate(target),
+      liveRepairApprovalState: liveRepairApprovalState(target, state, {}, Number(summaryNow)),
+      incident,
       statePath: target.statePath || null,
       stateExists: Boolean(target.statePath && existsSync(target.statePath)),
       configEnabled: isEnabledTarget(target),
@@ -964,6 +1050,78 @@ function targetPrRef(target = {}) {
   return null;
 }
 
+function focusedVerifyCommands(target = {}) {
+  return (Array.isArray(target.focusedChecks) ? target.focusedChecks : [])
+    .map((command) => String(command || '').trim())
+    .filter(Boolean);
+}
+
+export function buildVerifyGate(target = {}) {
+  const policy = liveRepairPolicy(target);
+  const required = policy.strictVerifyRequired !== undefined ? policy.strictVerifyRequired !== false : DEFAULT_STRICT_VERIFY_REQUIRED;
+  const commands = focusedVerifyCommands(target);
+  const present = commands.length > 0;
+  const status = present ? 'present' : (required ? 'missing' : 'not-required');
+  return {
+    schema: 'pr-shepherd-verify-gate/v1',
+    required,
+    status,
+    commands,
+    reason: present || !required ? null : 'automaticActions.liveRepair.strictVerifyRequired requires at least one focusedChecks command',
+  };
+}
+
+function hasLiveRepairApproval(target = {}) {
+  const policy = liveRepairPolicy(target);
+  return policy.enabled === true || typeof policy.approvalId === 'string' || typeof policy.approvedAt === 'string';
+}
+
+function consumedApprovalIds(state = {}) {
+  const ids = new Set();
+  if (Array.isArray(state.consumedLiveRepairApprovals)) {
+    for (const item of state.consumedLiveRepairApprovals) {
+      if (typeof item === 'string') ids.add(item);
+      else if (item?.approvalId) ids.add(String(item.approvalId));
+    }
+  }
+  if (state.liveRepairApprovalConsumption?.approvalId) ids.add(String(state.liveRepairApprovalConsumption.approvalId));
+  return ids;
+}
+
+export function liveRepairApprovalState(target = {}, state = {}, pr = {}, now = Date.now()) {
+  const policy = liveRepairPolicy(target);
+  const approvalId = typeof policy.approvalId === 'string' ? policy.approvalId.trim() : '';
+  if (!approvalId) return { state: 'missing', approvalId: null, reason: 'approval id missing' };
+  if (consumedApprovalIds(state).has(approvalId)) return { state: 'consumed', approvalId, reason: 'approval already consumed' };
+  if (policy.enabled !== true || policy.scope !== 'auto-safe-repair') return { state: 'invalid', approvalId, reason: 'approval is not enabled for auto-safe-repair' };
+  const expiresAt = Date.parse(policy.expiresAt || '');
+  if (!Number.isFinite(expiresAt)) return { state: 'invalid', approvalId, reason: 'approval expiry missing or invalid' };
+  if (now > expiresAt) return { state: 'expired', approvalId, reason: 'approval expired' };
+  if (pr?.headRefOid && policy.headRefOid && policy.headRefOid !== pr.headRefOid) {
+    return { state: 'invalidated-by-head-change', approvalId, reason: 'approval expected head does not match current PR head' };
+  }
+  return { state: 'unused', approvalId, reason: null };
+}
+
+function consumeLiveRepairApproval(state, target, outcome, reason, now = new Date()) {
+  const policy = liveRepairPolicy(target);
+  if (typeof policy.approvalId !== 'string' || policy.approvalId.trim() === '') return null;
+  const entry = {
+    approvalId: policy.approvalId,
+    consumedAt: now instanceof Date ? now.toISOString() : new Date(now).toISOString(),
+    outcome,
+    reason,
+    target: target.id || null,
+    pr: targetPrRef(target),
+  };
+  const existing = Array.isArray(state.consumedLiveRepairApprovals) ? state.consumedLiveRepairApprovals : [];
+  if (!existing.some((item) => item?.approvalId === entry.approvalId || item === entry.approvalId)) {
+    state.consumedLiveRepairApprovals = [...existing, entry].slice(-DEFAULT_ACTION_LEDGER_LIMIT);
+  }
+  state.liveRepairApprovalConsumption = entry;
+  return entry;
+}
+
 function currentBaseOid(state = {}, pr = {}) {
   return pr.baseRefOid || state.lastSeenBaseOid || null;
 }
@@ -1000,6 +1158,8 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
     baseRefOid: baseOid || null,
     repairKey,
   };
+  const verifyGate = buildVerifyGate(target);
+  const evidenceExpiresAt = new Date(now.getTime() + DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS).toISOString();
   const approvalText = [
     `One-shot approval required before live repair for ${target.id || '<target-id>'} / ${target.pr || '<owner/repo#number>'}.`,
     `Allowed command: ${liveRepairCommand.join(' ')}.`,
@@ -1008,6 +1168,7 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
     `Expected head: ${expectedRefs.headRefOid || '<head-ref-oid>'}.`,
     `Expected base: ${expectedRefs.baseRefOid || '<base-ref-oid>'}.`,
     `Repair key: ${repairKey}.`,
+    verifyGate.status === 'missing' ? `Verify gate blocker: ${verifyGate.reason}.` : 'Verify gate: focused checks are present.',
     'Approval must include an explicit expiresAt timestamp and expires earlier if any expected ref, branch, target, or repair key changes.',
   ].join(' ');
   const approvalPackage = {
@@ -1033,10 +1194,17 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
           branchAllowlist: headBranch ? [headBranch] : ['<head-branch>'],
           rehearsalMaxAgeMs: DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS,
           targetId: target.id || '<target-id>',
+          owner: target.owner || '<owner>',
+          repo: target.repo || '<repo>',
+          number: Number.isInteger(Number(target.number)) ? Number(target.number) : '<number>',
           pr: targetPrRef(target) || '<owner/repo#number>',
+          headOwner: target.headOwner || '<head-owner>',
+          actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
           headRefOid: expectedRefs.headRefOid || '<head-ref-oid>',
           baseRefOid: expectedRefs.baseRefOid || '<base-ref-oid>',
           repairKey,
+          phaseDPacketExpiresAt: evidenceExpiresAt,
+          strictVerifyRequired: verifyGate.required,
           rollbackNote: 'Remove or set automaticActions.liveRepair.enabled=false after this one-shot repair; rerun status to verify the result.',
         },
       },
@@ -1047,6 +1215,8 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
       mergeable: pr.mergeable || state.lastMergeable || null,
       mergeStateStatus: pr.mergeStateStatus || state.lastMergeStateStatus || null,
       plannedAction: explainAutomaticActionPlan(plan),
+      verifyGate,
+      evidenceExpiresAt,
       requiredLedgerMarkers: ['Start', 'Approval before live repair', 'Action', 'Done/PR/Block'],
       forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
     },
@@ -1087,8 +1257,14 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
   const headBranch = target.headBranch || pr?.headRefName || '';
   const baseOid = currentBaseOid(state, pr);
   const expectedRepairKey = repairPlanKey(pr, baseOid);
+  const verifyGate = buildVerifyGate(target);
+  const approvalState = liveRepairApprovalState(target, state, pr, now);
   if (policy.enabled !== true) failures.push('automaticActions.liveRepair.enabled is not true');
   if (policy.scope !== 'auto-safe-repair') failures.push('automaticActions.liveRepair.scope must be auto-safe-repair');
+  if (policy.actionClass !== AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR) failures.push('automaticActions.liveRepair.actionClass must be auto-safe-repair');
+  if (verifyGate.status === 'missing') failures.push(verifyGate.reason);
+  if (approvalState.state === 'consumed') failures.push('automaticActions.liveRepair.approvalId was already consumed');
+  if (approvalState.state === 'invalidated-by-head-change') failures.push('automaticActions.liveRepair.approvalId invalidated by head change');
   if (typeof policy.approvalId !== 'string' || policy.approvalId.trim() === '') failures.push('automaticActions.liveRepair.approvalId is required');
   if (typeof policy.approvedAt !== 'string' || Number.isNaN(Date.parse(policy.approvedAt))) failures.push('automaticActions.liveRepair.approvedAt is missing or invalid');
   if (typeof policy.expiresAt !== 'string' || Number.isNaN(Date.parse(policy.expiresAt))) failures.push('automaticActions.liveRepair.expiresAt is required');
@@ -1099,6 +1275,12 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
   const expectedPr = targetPrRef(target);
   if (typeof policy.targetId !== 'string' || policy.targetId.trim() === '') failures.push('automaticActions.liveRepair.targetId is required');
   else if (expectedTargetId && policy.targetId !== expectedTargetId) failures.push(`automaticActions.liveRepair.targetId must match selected target ${expectedTargetId}`);
+  if (typeof policy.owner !== 'string' || policy.owner.trim() === '') failures.push('automaticActions.liveRepair.owner is required');
+  else if (target.owner && policy.owner !== target.owner) failures.push(`automaticActions.liveRepair.owner must match selected owner ${target.owner}`);
+  if (typeof policy.repo !== 'string' || policy.repo.trim() === '') failures.push('automaticActions.liveRepair.repo is required');
+  else if (target.repo && policy.repo !== target.repo) failures.push(`automaticActions.liveRepair.repo must match selected repo ${target.repo}`);
+  if (!Number.isInteger(Number(policy.number)) || Number(policy.number) <= 0) failures.push('automaticActions.liveRepair.number is required');
+  else if (Number.isInteger(Number(target.number)) && Number(policy.number) !== Number(target.number)) failures.push(`automaticActions.liveRepair.number must match selected PR number ${Number(target.number)}`);
   if (typeof policy.pr !== 'string' || policy.pr.trim() === '') failures.push('automaticActions.liveRepair.pr is required');
   else if (expectedPr && policy.pr !== expectedPr) failures.push(`automaticActions.liveRepair.pr must match selected PR ${expectedPr}`);
   if (typeof policy.headRefOid !== 'string' || policy.headRefOid.trim() === '') failures.push('automaticActions.liveRepair.headRefOid is required');
@@ -1134,6 +1316,9 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
         if (expectedRefs.repairKey !== expectedRepairKey) failures.push('repair rehearsal approvalPackage repairKey does not match current PR state');
         if (!Array.isArray(approvalPackage.abortCriteria) || approvalPackage.abortCriteria.length === 0) failures.push('repair rehearsal approvalPackage abortCriteria are required');
         if (typeof approvalPackage.rollbackNote !== 'string' || approvalPackage.rollbackNote.trim() === '') failures.push('repair rehearsal approvalPackage rollbackNote is required');
+        const phaseDExpiresAt = Date.parse(policy.phaseDPacketExpiresAt || approvalPackage.evidenceBundle?.evidenceExpiresAt || '');
+        if (!Number.isFinite(phaseDExpiresAt)) failures.push('Phase D approval packet expiry is required');
+        else if (now > phaseDExpiresAt) failures.push('Phase D approval packet evidence has expired');
       }
       const ledger = Array.isArray(state.actionLedger) ? state.actionLedger : [];
       const hasRehearsalLedgerEntry = ledger.some((entry) => entry?.actionClass === AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL
@@ -1157,9 +1342,14 @@ export function planAutomaticAction(target, state = {}, pr = {}, classification 
   };
   if (kind === 'dirty') {
     if (opts.dryRun !== false) {
+      const verifyGate = buildVerifyGate(target);
       return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL, {
         ...base,
-        reasons: ['dirty PR requires rehearsal before live branch mutation'],
+        verifyGate,
+        reasons: [
+          'dirty PR requires rehearsal before live branch mutation',
+          ...(verifyGate.status === 'missing' ? [verifyGate.reason] : []),
+        ],
       });
     }
     const gateFailures = liveRepairGateFailures(target, state, pr, opts.now === undefined ? Date.now() : opts.now);
@@ -1299,6 +1489,11 @@ export function buildPostActionAuditEntry(target = {}, pr = {}, outcome = 'block
     url: target.url || pr.url || null,
     outcome,
     result: fields.result || outcome,
+    executionOutcome: fields.executionOutcome || outcome,
+    approvalPresent: fields.approvalPresent === undefined ? hasLiveRepairApproval(target) : Boolean(fields.approvalPresent),
+    blockReason: fields.blockReason || null,
+    actionClass: fields.actionClass || AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+    mutatesBranch: outcome === 'pushed',
     terminalLedgerMarker: outcome === 'block' ? 'Block' : 'Done',
     expectedRefs: {
       headBranch: target.headBranch || pr.headRefName || null,
@@ -1345,6 +1540,7 @@ export function buildLiveRepairExecutionHarness(target = {}, pr = {}, state = {}
   const branchDiffPaths = Array.isArray(fields.branchDiffPaths) ? fields.branchDiffPaths : [];
   const artifactEvidencePaths = Array.isArray(fields.artifactEvidencePaths) ? fields.artifactEvidencePaths : [];
   const contamination = findOpenClawRuntimeContextPaths([...branchDiffPaths, ...artifactEvidencePaths]);
+  const verifyGate = buildVerifyGate(target);
   const pushLimit = Number(target.autoPushLimit24h || 0);
   const recentPushCount = recentAutoPushes(state, now.getTime()).length;
   const liveGateFailures = liveRepairGateFailures(target, state, prWithBase, now.getTime());
@@ -1401,10 +1597,14 @@ export function buildLiveRepairExecutionHarness(target = {}, pr = {}, state = {}
       recentPushCount,
       pushLimit,
     }),
+    phaseEGate('strict-verify-gate', verifyGate.status !== 'missing', {
+      reason: verifyGate.reason || 'strict verify gate is satisfied',
+      verifyGate,
+    }),
     phaseEGate('focused-checks-before-push', true, {
       blocking: false,
       note: 'Focused checks run during execution immediately before the contamination guard and push.',
-      commands: Array.isArray(target.focusedChecks) ? target.focusedChecks.slice() : [],
+      commands: verifyGate.commands,
     }, false),
     phaseEGate('contamination-guard', contamination.length === 0, {
       reason: `OpenClaw runtime/bootstrap context paths would enter branch diff or artifact evidence: ${contamination.join(', ')}`,
@@ -1447,6 +1647,7 @@ export function buildLiveRepairExecutionHarness(target = {}, pr = {}, state = {}
       offendingRuntimeContextPaths: contamination,
       forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
     },
+    verifyGate,
   };
   return redactLedgerValue(harness, target);
 }
@@ -1859,12 +2060,58 @@ function assertNoOpenClawRuntimeContextInBranch(target, baseRef) {
   assertNoOpenClawRuntimeContextPaths(changedPaths, 'branch diff');
 }
 
+function nonRepairableBlockReason(kind) {
+  switch (kind) {
+    case 'clean': return 'target-clean';
+    case 'unstable': return 'target-pending';
+    case 'failed': return 'target-failed';
+    case 'unknown': return 'target-unknown';
+    case 'merged': return 'target-merged';
+    case 'disabled': return 'target-disabled';
+    default: return `target-${kind || 'not-repairable'}`;
+  }
+}
+
 function handleRepair(target, dryRun, opts = {}) {
   const unlock = acquireLock(target.lockPath, target.staleLockMs || 0);
   try {
     const { state, pr, classification } = handleCheck(target);
-    if (state.disabled) return;
+    if (state.disabled && classification.kind === 'disabled' && !hasLiveRepairApproval(target)) return;
     if (classification.kind !== 'dirty') {
+      const blockReason = nonRepairableBlockReason(classification.kind);
+      if (!dryRun && hasLiveRepairApproval(target)) {
+        const outcome = classification.kind === 'clean' ? 'no-op' : 'block';
+        const plan = buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.BLOCK, {
+          target: target.id,
+          pr: target.pr,
+          classification: classification.kind,
+          allowed: false,
+          requiresOperatorApproval: true,
+          reasons: [`approval present but target is not repairable: ${blockReason}`],
+        });
+        state.lastAutomaticActionPlan = plan;
+        state.lastAutomaticActionExecution = executeAutomaticActionPlan(plan, {}, { throwOnBlocked: false });
+        state.lastPostActionAudit = buildPostActionAuditEntry(target, pr || {}, outcome, {
+          state,
+          result: blockReason,
+          executionOutcome: outcome,
+          approvalPresent: true,
+          blockReason,
+          actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
+          operatorSummary: `${target.pr} live repair ${outcome}: approval present but current target state is ${classification.kind}; no branch mutation.`,
+        });
+        consumeLiveRepairApproval(state, target, outcome, blockReason);
+        state.lastActionSummary = `live repair ${outcome}: ${blockReason}; no branch mutation`;
+        appendPlanLedgerEntry(state, target, plan, outcome, {
+          repairKey: repairAttemptKey(pr || {}, state.lastSeenBaseOid),
+          expectedHeadOid: pr?.headRefOid || null,
+          expectedBaseOid: currentBaseOid(state, pr || {}),
+          rollbackNote: 'no branch mutation; one-shot approval consumed or invalidated by non-repairable state',
+          details: { blockReason, approvalPresent: true, classification: classification.kind },
+        });
+        notify(target, state, `repair-noop:${classification.kind}:${pr?.headRefOid || 'no-head'}`, `${target.pr} live repair ${outcome}: ${blockReason}; no branch mutation`, true);
+        saveJson(target.statePath, state);
+      }
       console.log(`[pr-shepherd:${target.id}] no repair needed for ${classification.kind}`);
       return;
     }
@@ -2091,7 +2338,9 @@ function handleRepair(target, dryRun, opts = {}) {
     if (ls !== remoteHead) throw new Error(`remote head changed; refusing push. expected ${remoteHead}, got ${ls}`);
     run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
-    state.autoPushes = [...pushes24h, { at: new Date().toISOString(), from: remoteHead, to: newHead, reason: 'dirty-rebase' }];
+    const pushedAt = new Date();
+    state.autoPushes = [...pushes24h, { at: pushedAt.toISOString(), from: remoteHead, to: newHead, reason: 'dirty-rebase' }];
+    consumeLiveRepairApproval(state, target, 'pushed', 'auto-safe-repair pushed', pushedAt);
     state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'pushed', {
       state,
       repairKey,
@@ -2140,7 +2389,14 @@ function handleTargetCommand(target, args, opts = {}) {
 }
 
 function summarizeTargetResult(target, outcome) {
-  if (outcome?.summary) return { ok: true, ...outcome.summary };
+  const state = outcome?.state || {};
+  const observationSummary = state.observationSummary || summarizeObservationLedger(state.observationLedger || [], new Date());
+  const fleetFields = {
+    targetTier: targetStateTier(target, state, Date.now()),
+    verifyGate: buildVerifyGate(target),
+    incident: buildTargetIncidentSummary(target, state, observationSummary),
+  };
+  if (outcome?.summary) return { ok: true, ...fleetFields, ...outcome.summary };
   if (outcome?.classification) {
     return {
       target: target.id,
@@ -2148,9 +2404,10 @@ function summarizeTargetResult(target, outcome) {
       kind: outcome.classification.kind,
       disabled: Boolean(outcome.state?.disabled),
       plannedAction: explainAutomaticActionPlan(planAutomaticAction(target, outcome.state || {}, outcome.pr || {}, outcome.classification, { dryRun: true, now: Date.now() })),
+      ...fleetFields,
     };
   }
-  return { target: target.id, ok: true };
+  return { target: target.id, ok: true, ...fleetFields };
 }
 
 export function orchestrateTargets(targets, args) {
@@ -2165,7 +2422,7 @@ export function orchestrateTargets(targets, args) {
       console.error(`[pr-shepherd:${target.id}] ${redact(err.message).slice(0, 8000)}`);
     }
   }
-  if (targets.length > 1) console.log(JSON.stringify({ command: args.cmd, targets: results }, null, 2));
+  if (targets.length > 1) console.log(JSON.stringify({ command: args.cmd, fleetBrief: buildFleetOperatorBrief(results), targets: results }, null, 2));
   const failures = results.filter((result) => !result.ok);
   if (failures.length > 0) throw new Error(`${failures.length}/${results.length} target(s) failed`);
   return results;
@@ -2187,7 +2444,7 @@ export function main(argv = process.argv.slice(2)) {
   const targets = selectTargets(cfg, args.targetSelectors, args.allTargets);
   if (args.cmd === 'status') {
     const rows = buildStatusRows(targets);
-    console.log(JSON.stringify(targets.length === 1 ? rows[0] : { command: 'status', targets: rows }, null, 2));
+    console.log(JSON.stringify(targets.length === 1 ? rows[0] : { command: 'status', fleetBrief: buildFleetOperatorBrief(rows), targets: rows }, null, 2));
     return rows;
   }
   if (args.cmd === 'canary') {
