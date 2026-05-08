@@ -142,7 +142,7 @@ Automatic action planning is explicit and fail-closed. `check`/`check-canary` ma
 `rehearse`/`repair --dry-run` records recent rehearsal evidence without branch mutation, and conflict handling
 plans either deterministic `autoSafe` repair or artifact/escalation. Live branch mutation is blocked unless
 target-level `automaticActions.liveRepair` is explicitly enabled with `scope="auto-safe-repair"`, `approvalId`,
-`approvedAt`, `approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
+`approvedAt`, `expiresAt`, `approvedBy`, a `branchAllowlist` containing the PR head branch, recent matching rehearsal evidence, the existing push budget,
 and the existing expected-head/`--force-with-lease` checks. Maintainer-owned head branches remain blocked unless
 that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true`. Live `repair` against multiple
 selected targets is blocked before GitHub/worktree access unless config-level `automaticActions.multiTargetLiveRepair`
@@ -176,6 +176,17 @@ out of branch diffs and evidence. Fail closed before PR creation if any of these
 would be committed or attached: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
 `IDENTITY.md`, or `.openclaw/**`. PR Shepherd applies the same guard before writing conflict
 artifact evidence or pushing a repaired branch.
+
+### Phase E execution readiness and post-action audit harness
+
+Phase E is still readiness-only in this repository. `buildLiveRepairExecutionHarness` assembles the
+final pre-execution gate report for a separately approved, target-specific, one-shot live repair: Phase D
+packet, approval id/scope/expiry, expected target/head/base/repair key, allowed branch, fresh dry-run
+evidence, `auto-safe-repair` action class, push budget, focused-check checkpoint, and runtime-context
+contamination guard. `buildPostActionAuditEntry` defines the sanitized no-op/pushed/block closeout shape
+with status/CI follow-up, terminal ledger marker, rollback/disable note, and evidence-hygiene fields.
+These helpers describe readiness and audit evidence; they do not grant approval or perform production
+branch mutation.
 
 ## Sandbox repair proof harness
 

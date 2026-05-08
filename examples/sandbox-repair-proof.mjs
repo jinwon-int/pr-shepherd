@@ -145,6 +145,7 @@ async function main() {
             scope: 'auto-safe-repair',
             approvalId: 'sandbox-proof-approval',
             approvedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
             approvedBy: 'sandbox-proof-harness',
             branchAllowlist: [headBranch],
           },

@@ -8,6 +8,8 @@ import {
   AUTOMATIC_ACTION_CLASSES,
   appendActionLedgerEntry,
   buildConflictArtifactPayload,
+  buildLiveRepairExecutionHarness,
+  buildPostActionAuditEntry,
   buildRepairRehearsalApprovalPackage,
   buildSituationReportLine,
   buildStatusRows,
@@ -257,6 +259,7 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
   assert.match(bad.errors.join('\n'), /liveRepair\.scope must be auto-safe-repair/);
   assert.match(bad.errors.join('\n'), /liveRepair\.approvalId is required/);
   assert.match(bad.errors.join('\n'), /liveRepair\.approvedAt must be an ISO-8601 timestamp/);
+  assert.match(bad.errors.join('\n'), /liveRepair\.expiresAt must be an ISO-8601 timestamp/);
   assert.match(bad.errors.join('\n'), /liveRepair\.approvedBy is required/);
   assert.match(bad.errors.join('\n'), /liveRepair\.branchAllowlist must be a non-empty string array/);
 
@@ -268,6 +271,7 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
           scope: 'auto-safe-repair',
           approvalId: 'approval-1',
           approvedAt: '2026-05-08T05:00:00Z',
+          expiresAt: '2026-05-08T06:00:00Z',
           approvedBy: 'operator',
           branchAllowlist: ['feature'],
         },
@@ -283,6 +287,7 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
           enabled: false,
           approvalId: '',
           approvedAt: 'not-a-date',
+          expiresAt: 'not-a-date',
           approvedBy: '',
         },
       },
@@ -291,6 +296,7 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
   assert.equal(malformed.ok, false);
   assert.match(malformed.errors.join('\n'), /liveRepair\.approvalId must be a non-empty string/);
   assert.match(malformed.errors.join('\n'), /liveRepair\.approvedAt must be an ISO-8601 timestamp/);
+  assert.match(malformed.errors.join('\n'), /liveRepair\.expiresAt must be an ISO-8601 timestamp/);
   assert.match(malformed.errors.join('\n'), /liveRepair\.approvedBy must be a non-empty string/);
 });
 
@@ -1149,6 +1155,7 @@ test('automatic action planner records rehearsal before permitting gated live re
         scope: 'auto-safe-repair',
         approvalId: 'approval-1',
         approvedAt: '2026-05-08T05:00:00Z',
+        expiresAt: '2026-05-08T06:00:00Z',
         approvedBy: 'operator',
         branchAllowlist: ['feature'],
         rehearsalMaxAgeMs: 10000,
@@ -1197,6 +1204,111 @@ test('automatic action planner records rehearsal before permitting gated live re
   assert.equal(live.allowed, true);
   assert.equal(live.pushAllowed, true);
   assert.equal(live.mutatesBranch, true);
+});
+
+test('Phase E execution harness fails closed without explicit one-shot approval', () => {
+  const target = validationTarget({ pr: 'owner/repo#1', headOwner: 'contributor', baseOwner: 'owner' });
+  const pr = { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
+  const harness = buildLiveRepairExecutionHarness(target, pr, {}, {
+    now: new Date('2026-05-08T05:30:00Z'),
+    branchDiffPaths: ['CHANGELOG.md'],
+    artifactEvidencePaths: [],
+  });
+
+  assert.equal(harness.schema, 'pr-shepherd-live-repair-execution-harness/v1');
+  assert.equal(harness.productionMutation, false);
+  assert.equal(harness.executionAllowed, false);
+  assert.match(harness.blockedReasons.join('\n'), /approval|liveRepair\.enabled/);
+  assert.equal(harness.postActionAudit.block.schema, 'pr-shepherd-post-action-audit/v1');
+  assert.equal(harness.postActionAudit.block.terminalLedgerMarker, 'Block');
+  assert.deepEqual(harness.evidenceHygiene.offendingRuntimeContextPaths, []);
+});
+
+test('Phase E execution harness records readiness, post-action audit shape, and contamination blocks', () => {
+  const target = validationTarget({
+    pr: 'owner/repo#1',
+    url: 'https://github.com/owner/repo/pull/1',
+    headOwner: 'contributor',
+    baseOwner: 'owner',
+    focusedChecks: ['npm test'],
+    automaticActions: {
+      liveRepair: {
+        enabled: true,
+        scope: 'auto-safe-repair',
+        approvalId: 'approval-phase-e-1',
+        approvedAt: '2026-05-08T05:00:00Z',
+        expiresAt: '2026-05-08T06:00:00Z',
+        approvedBy: 'operator',
+        branchAllowlist: ['feature'],
+        rehearsalMaxAgeMs: 60 * 60 * 1000,
+        targetId: 'target-1',
+        pr: 'owner/repo#1',
+        headRefOid: 'abc123',
+        baseRefOid: 'base-a',
+        repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+        rollbackNote: 'disable live repair after this one-shot run',
+      },
+    },
+  });
+  const pr = { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const rehearsalPlan = planAutomaticAction(target, {}, pr, classification, { dryRun: true, now: Date.parse('2026-05-08T05:00:00Z') });
+  const approvalPackage = buildRepairRehearsalApprovalPackage(target, pr, {}, rehearsalPlan, {
+    now: new Date('2026-05-08T05:00:00Z'),
+    repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+    baseOid: 'base-a',
+    classification: 'dirty',
+  });
+  const state = {
+    lastRepairRehearsal: {
+      at: '2026-05-08T05:00:00.000Z',
+      target: 'target-1',
+      repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+      headRefOid: 'abc123',
+      baseOid: 'base-a',
+      approvalPackage,
+    },
+    actionLedger: [{
+      actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL,
+      result: 'rehearsed',
+      repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
+    }],
+    autoPushes: [],
+  };
+
+  const harness = buildLiveRepairExecutionHarness(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T05:30:00Z'),
+    baseOid: 'base-a',
+    branchDiffPaths: ['CHANGELOG.md'],
+  });
+  assert.equal(harness.executionAllowed, true);
+  assert.equal(harness.expectedRefs.repairKey, 'repair:abc123:base-a:CONFLICTING:DIRTY');
+  assert.equal(harness.gates.find((gate) => gate.name === 'action-class-auto-safe-repair').ok, true);
+  assert.deepEqual(harness.commandTemplates.liveRepair, ['node', 'pr-shepherd.mjs', 'repair', '--config', '<config>', '--target', 'target-1']);
+  assert.equal(harness.postActionAudit.pushed.outcome, 'pushed');
+  assert.equal(harness.postActionAudit.pushed.ciFollowUp.required, true);
+  assert.equal(harness.postActionAudit['no-op'].terminalLedgerMarker, 'Done');
+
+  const contaminated = buildLiveRepairExecutionHarness(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T05:30:00Z'),
+    baseOid: 'base-a',
+    branchDiffPaths: ['AGENTS.md'],
+  });
+  assert.equal(contaminated.executionAllowed, false);
+  assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['AGENTS.md']);
+  assert.match(contaminated.blockedReasons.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
+
+  const audit = buildPostActionAuditEntry(target, pr, 'pushed', {
+    now: new Date('2026-05-08T05:45:00Z'),
+    baseOid: 'base-a',
+    beforeHeadOid: 'abc123',
+    afterHeadOid: 'def456',
+  });
+  assert.equal(audit.schema, 'pr-shepherd-post-action-audit/v1');
+  assert.equal(audit.terminalLedgerMarker, 'Done');
+  assert.equal(audit.expectedRefs.afterHeadOid, 'def456');
 });
 
 test('automatic action planner enforces branch allowlist and maintainer boundary', () => {

@@ -33,6 +33,7 @@ export const AUTOMATIC_ACTION_CLASSES = Object.freeze({
 export const DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_ACTION_LEDGER_LIMIT = 50;
 export const DEFAULT_OBSERVATION_LEDGER_LIMIT = 288; // 48h at a 10-minute standing-ops cadence.
+export const PHASE_E_POST_ACTION_OUTCOMES = ['no-op', 'pushed', 'block'];
 
 const OBSERVATION_WARNING_KINDS = new Set(['dirty', 'failed', 'unknown']);
 const OBSERVATION_SUMMARY_KINDS = ['clean', 'unstable', 'unknown', 'failed', 'dirty', 'merged', 'disabled'];
@@ -288,6 +289,7 @@ function validateAutomaticActions(errors, target, targetPath) {
     if (liveRepair.scope !== 'auto-safe-repair') errors.push(`${livePath}.scope must be auto-safe-repair when enabled`);
     if (typeof liveRepair.approvalId !== 'string' || liveRepair.approvalId.trim() === '') errors.push(`${livePath}.approvalId is required when enabled`);
     if (typeof liveRepair.approvedAt !== 'string' || Number.isNaN(Date.parse(liveRepair.approvedAt))) errors.push(`${livePath}.approvedAt must be an ISO-8601 timestamp when enabled`);
+    if (typeof liveRepair.expiresAt !== 'string' || Number.isNaN(Date.parse(liveRepair.expiresAt))) errors.push(`${livePath}.expiresAt must be an ISO-8601 timestamp when enabled`);
     if (typeof liveRepair.approvedBy !== 'string' || liveRepair.approvedBy.trim() === '') errors.push(`${livePath}.approvedBy is required when enabled`);
     if (!Array.isArray(liveRepair.branchAllowlist) || liveRepair.branchAllowlist.length === 0 || !liveRepair.branchAllowlist.every((item) => typeof item === 'string' && item.trim() !== '')) {
       errors.push(`${livePath}.branchAllowlist must be a non-empty string array when enabled`);
@@ -295,6 +297,7 @@ function validateAutomaticActions(errors, target, targetPath) {
   }
   if (liveRepair.approvalId !== undefined && (typeof liveRepair.approvalId !== 'string' || liveRepair.approvalId.trim() === '')) errors.push(`${livePath}.approvalId must be a non-empty string`);
   if (liveRepair.approvedAt !== undefined && (typeof liveRepair.approvedAt !== 'string' || Number.isNaN(Date.parse(liveRepair.approvedAt)))) errors.push(`${livePath}.approvedAt must be an ISO-8601 timestamp`);
+  if (liveRepair.expiresAt !== undefined && (typeof liveRepair.expiresAt !== 'string' || Number.isNaN(Date.parse(liveRepair.expiresAt)))) errors.push(`${livePath}.expiresAt must be an ISO-8601 timestamp`);
   if (liveRepair.approvedBy !== undefined && (typeof liveRepair.approvedBy !== 'string' || liveRepair.approvedBy.trim() === '')) errors.push(`${livePath}.approvedBy must be a non-empty string`);
   if (liveRepair.branchAllowlist !== undefined && (!Array.isArray(liveRepair.branchAllowlist) || !liveRepair.branchAllowlist.every((item) => typeof item === 'string' && item.trim() !== ''))) {
     errors.push(`${livePath}.branchAllowlist must be a string array`);
@@ -1005,7 +1008,7 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
     `Expected head: ${expectedRefs.headRefOid || '<head-ref-oid>'}.`,
     `Expected base: ${expectedRefs.baseRefOid || '<base-ref-oid>'}.`,
     `Repair key: ${repairKey}.`,
-    'This approval is separate from rehearsal evidence and expires if any expected ref, branch, target, or repair key changes.',
+    'Approval must include an explicit expiresAt timestamp and expires earlier if any expected ref, branch, target, or repair key changes.',
   ].join(' ');
   const approvalPackage = {
     schema: 'pr-shepherd-repair-rehearsal-approval/v1',
@@ -1025,6 +1028,7 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
           scope: 'auto-safe-repair',
           approvalId: '<one-shot-approval-id>',
           approvedAt: '<approval-iso8601>',
+          expiresAt: '<approval-expiry-iso8601>',
           approvedBy: '<operator>',
           branchAllowlist: headBranch ? [headBranch] : ['<head-branch>'],
           rehearsalMaxAgeMs: DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS,
@@ -1087,6 +1091,8 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
   if (policy.scope !== 'auto-safe-repair') failures.push('automaticActions.liveRepair.scope must be auto-safe-repair');
   if (typeof policy.approvalId !== 'string' || policy.approvalId.trim() === '') failures.push('automaticActions.liveRepair.approvalId is required');
   if (typeof policy.approvedAt !== 'string' || Number.isNaN(Date.parse(policy.approvedAt))) failures.push('automaticActions.liveRepair.approvedAt is missing or invalid');
+  if (typeof policy.expiresAt !== 'string' || Number.isNaN(Date.parse(policy.expiresAt))) failures.push('automaticActions.liveRepair.expiresAt is required');
+  else if (now > Date.parse(policy.expiresAt)) failures.push('automaticActions.liveRepair.expiresAt has expired');
   if (typeof policy.approvedBy !== 'string' || policy.approvedBy.trim() === '') failures.push('automaticActions.liveRepair.approvedBy is required');
 
   const expectedTargetId = target.id || null;
@@ -1262,6 +1268,187 @@ export function executeAutomaticActionPlan(plan, handlers = {}, opts = {}) {
   const handler = handlers[plan.actionClass];
   if (!handler) return automaticActionExecution(plan, 'skipped');
   return automaticActionExecution(plan, 'executed', { result: handler(plan) });
+}
+
+function phaseEGate(name, ok, details = {}, blocking = true) {
+  return {
+    name,
+    ok: Boolean(ok),
+    blocking: Boolean(blocking),
+    ...details,
+  };
+}
+
+function phaseEBlockedReasons(gates, plan) {
+  const gateReasons = gates
+    .filter((gate) => gate.blocking && !gate.ok)
+    .map((gate) => gate.reason || `${gate.name} failed`);
+  return [...new Set([...gateReasons, ...(Array.isArray(plan?.reasons) ? plan.reasons : [])])];
+}
+
+export function buildPostActionAuditEntry(target = {}, pr = {}, outcome = 'block', fields = {}) {
+  if (!PHASE_E_POST_ACTION_OUTCOMES.includes(outcome)) throw new Error(`unsupported Phase E post-action outcome: ${outcome}`);
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const baseOid = fields.baseOid || currentBaseOid(fields.state || {}, pr);
+  const repairKey = fields.repairKey || repairPlanKey(pr, baseOid);
+  const audit = {
+    schema: 'pr-shepherd-post-action-audit/v1',
+    createdAt: now.toISOString(),
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    url: target.url || pr.url || null,
+    outcome,
+    result: fields.result || outcome,
+    terminalLedgerMarker: outcome === 'block' ? 'Block' : 'Done',
+    expectedRefs: {
+      headBranch: target.headBranch || pr.headRefName || null,
+      baseBranch: target.baseBranch || pr.baseRefName || null,
+      beforeHeadOid: fields.beforeHeadOid || pr.headRefOid || null,
+      afterHeadOid: fields.afterHeadOid || null,
+      baseRefOid: baseOid || null,
+      repairKey,
+    },
+    prStateFollowUp: {
+      required: true,
+      command: renderedCommand('status', target),
+      expected: outcome === 'pushed' ? 'PR should leave dirty state after GitHub recalculates mergeability and CI completes.' : 'Record current PR state without mutation.',
+    },
+    ciFollowUp: {
+      required: outcome === 'pushed',
+      note: outcome === 'pushed' ? 'Re-run status/check-canary after GitHub updates checks; do not push again under this one-shot approval.' : 'No CI follow-up beyond status evidence unless operator asks.',
+    },
+    rollbackDisableNote: fields.rollbackDisableNote || 'Disable automaticActions.liveRepair after this one-shot run; keep state/actionLedger for audit.',
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    operatorSummary: fields.operatorSummary || `${target.id || 'target'} ${outcome}; see actionLedger and status follow-up for evidence.`,
+  };
+  return redactLedgerValue(audit, target);
+}
+
+export function buildLiveRepairExecutionHarness(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const classification = fields.classification || classifyPr(pr);
+  const baseOid = fields.baseOid || currentBaseOid(state, pr);
+  const repairKey = fields.repairKey || repairPlanKey(pr, baseOid);
+  const prWithBase = { ...pr, baseRefOid: baseOid || pr.baseRefOid };
+  const plan = fields.plan || planAutomaticAction(target, state, prWithBase, classification, { dryRun: false, now: now.getTime() });
+  const policy = liveRepairPolicy(target);
+  const rehearsal = state.lastRepairRehearsal;
+  const approvalPackage = rehearsal?.approvalPackage;
+  const rehearsalAt = Date.parse(rehearsal?.at || '');
+  const rehearsalMaxAgeMs = policy.rehearsalMaxAgeMs === undefined ? DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS : Number(policy.rehearsalMaxAgeMs);
+  const approvalExpiresAt = Date.parse(policy.expiresAt || '');
+  const branchDiffPaths = Array.isArray(fields.branchDiffPaths) ? fields.branchDiffPaths : [];
+  const artifactEvidencePaths = Array.isArray(fields.artifactEvidencePaths) ? fields.artifactEvidencePaths : [];
+  const contamination = findOpenClawRuntimeContextPaths([...branchDiffPaths, ...artifactEvidencePaths]);
+  const pushLimit = Number(target.autoPushLimit24h || 0);
+  const recentPushCount = recentAutoPushes(state, now.getTime()).length;
+  const liveGateFailures = liveRepairGateFailures(target, state, prWithBase, now.getTime());
+  const gates = [
+    phaseEGate('phase-d-packet-present', approvalPackage?.schema === 'pr-shepherd-repair-rehearsal-approval/v1', {
+      reason: 'Phase D rehearsal approval package is missing',
+      schema: approvalPackage?.schema || null,
+    }),
+    phaseEGate('one-shot-approval-metadata', policy.enabled === true
+      && policy.scope === 'auto-safe-repair'
+      && typeof policy.approvalId === 'string' && policy.approvalId.trim() !== ''
+      && typeof policy.approvedBy === 'string' && policy.approvedBy.trim() !== ''
+      && typeof policy.approvedAt === 'string' && !Number.isNaN(Date.parse(policy.approvedAt)), {
+      reason: 'one-shot approval id/scope/approvedAt/approvedBy are incomplete',
+      approvalId: policy.approvalId || null,
+      scope: policy.scope || null,
+    }),
+    phaseEGate('approval-expiry', Number.isFinite(approvalExpiresAt) && now.getTime() <= approvalExpiresAt, {
+      reason: 'one-shot approval expiry is missing or expired',
+      expiresAt: policy.expiresAt || null,
+    }),
+    phaseEGate('target-and-refs-match', policy.targetId === (target.id || null)
+      && policy.pr === (targetPrRef(target) || null)
+      && policy.headRefOid === (pr.headRefOid || null)
+      && policy.baseRefOid === (baseOid || null)
+      && policy.repairKey === repairKey, {
+      reason: 'target, PR, expected head/base, or repairKey does not match current state',
+      expectedHeadOid: pr.headRefOid || null,
+      expectedBaseOid: baseOid || null,
+      repairKey,
+    }),
+    phaseEGate('allowed-branch', Array.isArray(policy.branchAllowlist) && policy.branchAllowlist.includes(target.headBranch || pr.headRefName), {
+      reason: 'head branch is not allowed by the one-shot approval',
+      headBranch: target.headBranch || pr.headRefName || null,
+    }),
+    phaseEGate('dry-run-evidence-fresh', policy.requireRecentRehearsal === false || (Number.isFinite(rehearsalAt)
+      && now.getTime() - rehearsalAt <= rehearsalMaxAgeMs
+      && rehearsal?.repairKey === repairKey
+      && rehearsal?.headRefOid === pr.headRefOid
+      && rehearsal?.baseOid === baseOid), {
+      reason: 'dry-run rehearsal evidence is missing, stale, or for different refs',
+      rehearsalAt: rehearsal?.at || null,
+      rehearsalMaxAgeMs,
+    }),
+    phaseEGate('action-class-auto-safe-repair', plan.allowed === true
+      && plan.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR
+      && plan.pushAllowed === true
+      && plan.mutatesBranch === true, {
+      reason: `planned action is not executable auto-safe-repair (${plan.actionClass || 'missing'})`,
+      plannedAction: explainAutomaticActionPlan(plan),
+    }),
+    phaseEGate('push-budget', Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit, {
+      reason: '24h push budget is exhausted or not configured',
+      recentPushCount,
+      pushLimit,
+    }),
+    phaseEGate('focused-checks-before-push', true, {
+      blocking: false,
+      note: 'Focused checks run during execution immediately before the contamination guard and push.',
+      commands: Array.isArray(target.focusedChecks) ? target.focusedChecks.slice() : [],
+    }, false),
+    phaseEGate('contamination-guard', contamination.length === 0, {
+      reason: `OpenClaw runtime/bootstrap context paths would enter branch diff or artifact evidence: ${contamination.join(', ')}`,
+      offendingPaths: contamination,
+    }),
+  ];
+  const blockedReasons = phaseEBlockedReasons(gates, {
+    ...plan,
+    reasons: liveGateFailures.length > 0 || !plan.allowed ? (liveGateFailures.length > 0 ? liveGateFailures : plan.reasons) : [],
+  });
+  const harness = {
+    schema: 'pr-shepherd-live-repair-execution-harness/v1',
+    createdAt: now.toISOString(),
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    url: target.url || pr.url || null,
+    productionMutation: false,
+    executionAllowed: blockedReasons.length === 0,
+    blockedReasons,
+    commandTemplates: {
+      liveRepair: renderedCommand('repair', target, fields),
+      statusFollowUp: renderedCommand('status', target),
+      checkCanaryFollowUp: renderedCommand('check-canary', target),
+    },
+    expectedRefs: {
+      headBranch: target.headBranch || pr.headRefName || null,
+      baseBranch: target.baseBranch || pr.baseRefName || null,
+      headRefOid: pr.headRefOid || null,
+      baseRefOid: baseOid || null,
+      repairKey,
+    },
+    gates,
+    postActionAudit: Object.fromEntries(PHASE_E_POST_ACTION_OUTCOMES.map((outcome) => [
+      outcome,
+      buildPostActionAuditEntry(target, prWithBase, outcome, { ...fields, state, baseOid, repairKey }),
+    ])),
+    evidenceHygiene: {
+      plannedBranchDiffPaths: branchDiffPaths.slice().sort(),
+      plannedArtifactEvidencePaths: artifactEvidencePaths.slice().sort(),
+      offendingRuntimeContextPaths: contamination,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+  };
+  return redactLedgerValue(harness, target);
 }
 
 function notificationEnv(target, line, meta = {}) {
@@ -1747,9 +1934,23 @@ function handleRepair(target, dryRun, opts = {}) {
       }, null, 2));
       return;
     }
+    state.lastExecutionReadinessHarness = buildLiveRepairExecutionHarness(target, pr, state, {
+      classification,
+      plan: automaticPlan,
+      repairKey: preRepairKey,
+      baseOid: currentBaseOid(state, pr),
+      artifactDir: opts.artifactDir,
+    });
     if (!automaticPlan.allowed) {
       const execution = executeAutomaticActionPlan(automaticPlan, {}, { throwOnBlocked: false });
       state.lastAutomaticActionExecution = execution;
+      state.lastPostActionAudit = buildPostActionAuditEntry(target, pr, 'block', {
+        state,
+        result: 'policy-block',
+        repairKey: preRepairKey,
+        baseOid: currentBaseOid(state, pr),
+        operatorSummary: `${target.pr} live repair blocked before worktree access: ${automaticPlan.reasons.join('; ')}`,
+      });
       state.lastActionSummary = `live repair blocked: ${automaticPlan.reasons.join('; ')}`;
       appendPlanLedgerEntry(state, target, automaticPlan, 'blocked', {
         repairKey: preRepairKey,
@@ -1770,9 +1971,23 @@ function handleRepair(target, dryRun, opts = {}) {
     const repairKey = repairAttemptKey(pr, baseOid);
     const postFetchPlan = planAutomaticAction(target, state, { ...pr, baseRefOid: baseOid }, classification, { dryRun: false, now: Date.now() });
     state.lastAutomaticActionPlan = postFetchPlan;
+    state.lastExecutionReadinessHarness = buildLiveRepairExecutionHarness(target, { ...pr, baseRefOid: baseOid }, state, {
+      classification,
+      plan: postFetchPlan,
+      repairKey,
+      baseOid,
+      artifactDir: opts.artifactDir,
+    });
     if (!postFetchPlan.allowed) {
       const execution = executeAutomaticActionPlan(postFetchPlan, {}, { throwOnBlocked: false });
       state.lastAutomaticActionExecution = execution;
+      state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'block', {
+        state,
+        result: 'post-fetch-policy-block',
+        repairKey,
+        baseOid,
+        operatorSummary: `${target.pr} live repair blocked after fetch: ${postFetchPlan.reasons.join('; ')}`,
+      });
       state.lastActionSummary = `live repair blocked after fetch: ${postFetchPlan.reasons.join('; ')}`;
       appendPlanLedgerEntry(state, target, postFetchPlan, 'blocked', {
         repairKey,
@@ -1877,6 +2092,14 @@ function handleRepair(target, dryRun, opts = {}) {
     run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
     state.autoPushes = [...pushes24h, { at: new Date().toISOString(), from: remoteHead, to: newHead, reason: 'dirty-rebase' }];
+    state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'pushed', {
+      state,
+      repairKey,
+      baseOid,
+      beforeHeadOid: remoteHead,
+      afterHeadOid: newHead,
+      operatorSummary: `${target.pr} repair pushed with force-with-lease; disable one-shot approval and verify PR/CI state.`,
+    });
     state.lastActionSummary = `repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`;
     appendPlanLedgerEntry(state, target, postFetchPlan, 'pushed', {
       repairKey,
