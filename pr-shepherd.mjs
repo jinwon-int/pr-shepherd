@@ -46,6 +46,15 @@ export const DEFAULT_OBSERVATION_LEDGER_LIMIT = 288; // 48h at a 10-minute stand
 export const DEFAULT_STRICT_VERIFY_REQUIRED = true;
 export const DEFAULT_INCIDENT_BLOCK_THRESHOLD = 3;
 export const PHASE_E_POST_ACTION_OUTCOMES = ['no-op', 'pushed', 'block'];
+export const REVIEW_DECISION_OUTCOMES = Object.freeze([
+  'accepted-for-rehearsal',
+  'route-code-assisted',
+  'human-only',
+  'wait-recheck',
+  'no-op-clean',
+  'blocked-stale',
+  'blocked-risk',
+]);
 
 const OBSERVATION_WARNING_KINDS = new Set(['dirty', 'failed', 'unknown']);
 const OBSERVATION_SUMMARY_KINDS = ['clean', 'unstable', 'unknown', 'failed', 'dirty', 'merged', 'disabled'];
@@ -73,7 +82,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs decision-ledger --handoff path --decision outcome [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
   process.exit(exitCode);
 }
 
@@ -84,7 +93,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'repair', 'rehearse'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'decision-ledger', 'repair', 'rehearse'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -92,7 +101,17 @@ function parseArgs(argv) {
     keepFailedRebaseWorktree: true,
     artifactDir: null,
     diagnoseBundle: null,
+    handoff: null,
+    prState: null,
+    statePath: null,
     output: null,
+    decision: null,
+    operator: null,
+    summary: null,
+    nextOwner: null,
+    workstream: null,
+    focusedChecks: [],
+    riskFlags: [],
     targetSelectors: [],
     allTargets: false,
   };
@@ -109,12 +128,26 @@ function parseArgs(argv) {
     else if (a === '--no-keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = false;
     else if (a === '--artifact-dir') args.artifactDir = requireValue(a, rest[++i]);
     else if (a === '--diagnose-bundle') args.diagnoseBundle = requireValue(a, rest[++i]);
+    else if (a === '--handoff' || a === '--repair-plan-handoff') args.handoff = requireValue(a, rest[++i]);
+    else if (a === '--pr-state') args.prState = requireValue(a, rest[++i]);
+    else if (a === '--state') args.statePath = requireValue(a, rest[++i]);
+    else if (a === '--decision') args.decision = requireValue(a, rest[++i]);
+    else if (a === '--operator' || a === '--reviewer') args.operator = requireValue(a, rest[++i]);
+    else if (a === '--summary') args.summary = requireValue(a, rest[++i]);
+    else if (a === '--next-owner') args.nextOwner = requireValue(a, rest[++i]);
+    else if (a === '--workstream') args.workstream = requireValue(a, rest[++i]);
+    else if (a === '--focused-check') args.focusedChecks.push(requireValue(a, rest[++i]));
+    else if (a === '--risk') args.riskFlags.push(requireValue(a, rest[++i]));
     else if (a === '--output') args.output = requireValue(a, rest[++i]);
     else if (a === '--help' || a === '-h') usage(0);
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (args.cmd === 'repair-plan') {
     if (!args.diagnoseBundle) usage();
+  } else if (args.cmd === 'decision-ledger') {
+    if (!args.handoff || !args.decision) usage();
+    if (args.allTargets) throw new Error('decision-ledger records one operator decision at a time; --all is not supported');
+    if (!REVIEW_DECISION_OUTCOMES.includes(args.decision)) throw new Error(`--decision must be one of: ${REVIEW_DECISION_OUTCOMES.join(', ')}`);
   } else if (!args.config) usage();
   if (args.cmd === 'rehearse') {
     args.dryRun = true;
@@ -630,6 +663,260 @@ export function summarizeActionLedger(ledger = [], limit = 3) {
   };
 }
 
+function normalizedDecisionOutcome(outcome) {
+  const value = String(outcome || '').trim();
+  if (!REVIEW_DECISION_OUTCOMES.includes(value)) {
+    throw new Error(`unsupported review decision outcome: ${value || '(empty)'}`);
+  }
+  return value;
+}
+
+function compactStrings(items = []) {
+  return [...new Set((Array.isArray(items) ? items : [items])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean))];
+}
+
+function currentRefState(currentPr = {}, state = {}) {
+  return {
+    headRefOid: currentPr?.headRefOid || state.lastSeenHeadOid || null,
+    baseRefOid: currentPr?.baseRefOid || state.lastSeenBaseOid || null,
+    mergeable: currentPr?.mergeable || state.lastMergeable || null,
+    mergeStateStatus: currentPr?.mergeStateStatus || state.lastMergeStateStatus || null,
+    reviewDecision: currentPr?.reviewDecision || state.lastReviewDecision || null,
+  };
+}
+
+function handoffPrState(handoff = {}) {
+  return handoff.prState || handoff.evidence?.prState || handoff.source?.prState || {};
+}
+
+function checkCountFromHandoff(checks = {}, key) {
+  const countKey = `${key}Count`;
+  if (Number.isInteger(checks[countKey])) return checks[countKey];
+  if (Array.isArray(checks[key])) return checks[key].length;
+  return null;
+}
+
+function handoffFocusedChecks(handoff = {}) {
+  const artifactHints = Array.isArray(handoff.reviewArtifacts)
+    ? handoff.reviewArtifacts.flatMap((artifact) => artifact?.focusedCommandHints || [])
+    : [];
+  return compactStrings([
+    ...(handoff.focusedCommandHints || []),
+    ...(handoff.evidence?.focusedCommandHints || []),
+    ...artifactHints,
+  ]);
+}
+
+function staleReviewEvidenceReasons(handoff = {}, currentPr = {}, state = {}, classification = {}) {
+  const expectedRefs = handoff.expectedRefs || {};
+  const expectedPrState = handoffPrState(handoff);
+  const currentRefs = currentRefState(currentPr, state);
+  const reasons = [];
+  if (!currentRefs.headRefOid) reasons.push('current headRefOid unavailable; refresh PR state before recording decision');
+  else if (expectedRefs.headRefOid && expectedRefs.headRefOid !== currentRefs.headRefOid) reasons.push(`headRefOid differs from handoff: expected ${expectedRefs.headRefOid}, current ${currentRefs.headRefOid}`);
+  if (expectedRefs.baseRefOid) {
+    if (!currentRefs.baseRefOid) reasons.push('current baseRefOid unavailable; refresh base evidence before recording decision');
+    else if (expectedRefs.baseRefOid !== currentRefs.baseRefOid) reasons.push(`baseRefOid differs from handoff: expected ${expectedRefs.baseRefOid}, current ${currentRefs.baseRefOid}`);
+  }
+  const expectedKind = expectedPrState.classification || handoff.decision?.classification || null;
+  if (expectedKind && classification?.kind && expectedKind !== classification.kind) reasons.push(`classification differs from handoff: expected ${expectedKind}, current ${classification.kind}`);
+  const expectedFailed = checkCountFromHandoff(expectedPrState.checks, 'failed');
+  const expectedPending = checkCountFromHandoff(expectedPrState.checks, 'pending');
+  const failedCount = classification?.checks?.failed?.length || 0;
+  const pendingCount = classification?.checks?.pending?.length || 0;
+  if (Number.isInteger(expectedFailed) && expectedFailed !== failedCount) reasons.push(`failed check count differs from handoff: expected ${expectedFailed}, current ${failedCount}`);
+  if (Number.isInteger(expectedPending) && expectedPending !== pendingCount) reasons.push(`pending check count differs from handoff: expected ${expectedPending}, current ${pendingCount}`);
+  return reasons;
+}
+
+function handoffAllowsOutcome(handoff = {}, outcome, classification = {}, currentPr = {}) {
+  const decisionKind = String(handoff.decision?.kind || '').toLowerCase();
+  const actionClass = handoff.decision?.actionClass || handoff.actionPlan?.actionClass || null;
+  const reviewDecision = String(currentPr?.reviewDecision || '').toUpperCase();
+  if (outcome === 'blocked-stale' || outcome === 'blocked-risk') return { allowed: true, reasons: [] };
+  const reasons = [];
+  let allowed = false;
+  if (outcome === 'accepted-for-rehearsal') {
+    allowed = actionClass === AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL || decisionKind.includes('auto-safe') || decisionKind.includes('rehearsal');
+    if (reviewDecision === 'CHANGES_REQUESTED') reasons.push('GitHub reviewDecision is CHANGES_REQUESTED; rehearse only after reviewer feedback is resolved or explicitly re-routed');
+    if (classification?.kind && classification.kind !== 'dirty') reasons.push(`current classification ${classification.kind} is not dirty; rehearsal acceptance is not safe`);
+  } else if (outcome === 'route-code-assisted') {
+    allowed = actionClass === AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT || decisionKind.includes('code-assisted');
+  } else if (outcome === 'human-only') {
+    allowed = decisionKind.includes('human') || decisionKind.includes('maintainer');
+  } else if (outcome === 'wait-recheck') {
+    allowed = actionClass === AUTOMATIC_ACTION_CLASSES.RECHECK || decisionKind.includes('wait') || decisionKind.includes('recheck') || decisionKind.includes('refresh') || ['unknown', 'unstable', 'failed'].includes(classification?.kind);
+  } else if (outcome === 'no-op-clean') {
+    allowed = decisionKind.includes('no-op') || classification?.kind === 'clean' || classification?.kind === 'merged';
+  }
+  if (!allowed) reasons.push(`handoff decision ${handoff.decision?.kind || '(unknown)'} does not support outcome ${outcome}`);
+  return { allowed: allowed && reasons.length === 0, reasons };
+}
+
+function reviewDecisionRiskFlags(currentPr = {}, outcome) {
+  const reviewDecision = String(currentPr?.reviewDecision || '').toUpperCase();
+  const flags = [];
+  if (reviewDecision === 'CHANGES_REQUESTED') flags.push('github-review-changes-requested');
+  if (reviewDecision === 'REVIEW_REQUIRED') flags.push('github-review-required');
+  if (reviewDecision === 'APPROVED' && ['route-code-assisted', 'human-only', 'blocked-risk'].includes(outcome)) flags.push('github-approved-but-operator-review-still-required');
+  return flags;
+}
+
+function decisionIdForFeedback(feedback = {}) {
+  const refs = feedback.staleEvidence?.currentRefs || feedback.expectedRefs || {};
+  return [
+    'decision',
+    feedback.target || 'target',
+    feedback.sourceHandoff?.createdAt || feedback.sourceHandoff?.decisionKind || 'handoff',
+    feedback.requestedOutcome || feedback.outcome || 'outcome',
+    refs.headRefOid || 'no-head',
+    refs.baseRefOid || 'no-base',
+  ].join(':');
+}
+
+export function buildReviewStateFeedback(handoff = {}, currentPr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const target = fields.target || {};
+  const requestedOutcome = normalizedDecisionOutcome(fields.decision || fields.outcome || 'wait-recheck');
+  const classification = fields.classification || classifyPr(currentPr || {});
+  const staleReasons = staleReviewEvidenceReasons(handoff, currentPr, state, classification);
+  const transition = handoffAllowsOutcome(handoff, requestedOutcome, classification, currentPr);
+  const riskFlags = compactStrings([
+    ...(fields.riskFlags || []),
+    ...reviewDecisionRiskFlags(currentPr, requestedOutcome),
+    ...(staleReasons.length > 0 ? ['stale-evidence'] : []),
+    ...(!transition.allowed ? ['unsupported-transition'] : []),
+    requestedOutcome === 'route-code-assisted' ? ['code-assisted-review-only'] : [],
+    requestedOutcome === 'human-only' ? ['human-only-review-only'] : [],
+  ]);
+  let outcome = requestedOutcome;
+  let status = 'recorded';
+  let terminalLedgerMarker = 'Done';
+  const blockedReasons = [];
+  if (staleReasons.length > 0 && requestedOutcome !== 'blocked-stale') {
+    outcome = 'blocked-stale';
+    status = 'blocked';
+    terminalLedgerMarker = 'Block';
+    blockedReasons.push(...staleReasons);
+  } else if (!transition.allowed && requestedOutcome !== 'blocked-risk') {
+    outcome = 'blocked-risk';
+    status = 'blocked';
+    terminalLedgerMarker = 'Block';
+    blockedReasons.push(...transition.reasons);
+  } else if (requestedOutcome === 'blocked-stale' || requestedOutcome === 'blocked-risk') {
+    status = 'blocked';
+    terminalLedgerMarker = 'Block';
+    blockedReasons.push(...(requestedOutcome === 'blocked-stale' ? staleReasons : transition.reasons));
+  }
+  const refreshAfter = new Date(now.getTime() + Number(fields.refreshAfterMs || 60 * 60 * 1000)).toISOString();
+  const expiresAt = new Date(now.getTime() + Number(fields.expiresAfterMs || 6 * 60 * 60 * 1000)).toISOString();
+  const feedback = {
+    schema: 'pr-shepherd-review-state-feedback/v1',
+    decisionId: null,
+    createdAt: now.toISOString(),
+    target: target.id || handoff.target || null,
+    pr: targetPrRef(target) || target.pr || handoff.pr || null,
+    url: target.url || handoff.url || currentPr?.url || null,
+    productionMutation: false,
+    mutatesBranch: false,
+    pushAllowed: false,
+    noLiveApproval: true,
+    requestedOutcome,
+    outcome,
+    status,
+    decisionAllowed: status !== 'blocked',
+    blockedReasons,
+    sourceHandoff: {
+      schema: handoff.schema || null,
+      createdAt: handoff.createdAt || null,
+      decisionKind: handoff.decision?.kind || null,
+      actionClass: handoff.decision?.actionClass || handoff.actionPlan?.actionClass || null,
+      terminalLedgerMarker: handoff.terminalLedgerMarker || null,
+    },
+    expectedRefs: handoff.expectedRefs || {},
+    reviewState: {
+      classification: classification?.kind || 'unknown',
+      mergeable: currentPr?.mergeable || state.lastMergeable || null,
+      mergeStateStatus: currentPr?.mergeStateStatus || state.lastMergeStateStatus || null,
+      reviewDecision: currentPr?.reviewDecision || state.lastReviewDecision || null,
+      failedCount: classification?.checks?.failed?.length || 0,
+      pendingCount: classification?.checks?.pending?.length || 0,
+    },
+    staleEvidence: {
+      stale: staleReasons.length > 0,
+      reasons: staleReasons,
+      currentRefs: currentRefState(currentPr, state),
+      refreshRequired: staleReasons.length > 0,
+    },
+    reviewerOperatorSummary: fields.summary || fields.operatorSummary || null,
+    operator: fields.operator || fields.reviewer || null,
+    requestedNextOwner: fields.nextOwner || null,
+    requestedWorkstream: fields.workstream || null,
+    focusedChecks: compactStrings(fields.focusedChecks?.length ? fields.focusedChecks : handoffFocusedChecks(handoff)),
+    riskFlags,
+    refreshAfter,
+    expiresAt,
+    terminalLedgerMarker,
+    nextStep: status === 'blocked'
+      ? 'refresh evidence or record an explicit blocked-risk/blocked-stale operator decision; do not mutate branches'
+      : nextActionForClassification(classification),
+  };
+  feedback.decisionId = fields.id || decisionIdForFeedback(feedback);
+  return redactLedgerValue(feedback, target);
+}
+
+export function appendOperatorDecisionLedgerEntry(state, target = {}, feedback = {}, now = new Date()) {
+  const ledger = Array.isArray(state.operatorDecisionLedger) ? state.operatorDecisionLedger.slice() : [];
+  const entry = redactLedgerValue({
+    schema: 'pr-shepherd-operator-decision-ledger/v1',
+    at: now instanceof Date ? now.toISOString() : new Date(now).toISOString(),
+    id: feedback.decisionId || decisionIdForFeedback(feedback),
+    target: target.id || feedback.target || null,
+    pr: targetPrRef(target) || target.pr || feedback.pr || null,
+    outcome: feedback.outcome || null,
+    requestedOutcome: feedback.requestedOutcome || null,
+    status: feedback.status || null,
+    operator: feedback.operator || null,
+    reviewerOperatorSummary: feedback.reviewerOperatorSummary || null,
+    requestedNextOwner: feedback.requestedNextOwner || null,
+    requestedWorkstream: feedback.requestedWorkstream || null,
+    focusedChecks: feedback.focusedChecks || [],
+    riskFlags: feedback.riskFlags || [],
+    staleEvidence: feedback.staleEvidence || null,
+    noLiveApproval: feedback.noLiveApproval !== false,
+    terminalLedgerMarker: feedback.terminalLedgerMarker || null,
+  }, target);
+  if (ledger.some((item) => item?.id === entry.id)) {
+    state.operatorDecisionLedger = ledger;
+    return false;
+  }
+  state.operatorDecisionLedger = [...ledger, entry].slice(-DEFAULT_ACTION_LEDGER_LIMIT);
+  state.lastOperatorDecisionFeedback = feedback;
+  return true;
+}
+
+export function summarizeOperatorDecisionLedger(ledger = [], limit = 3) {
+  const entries = Array.isArray(ledger) ? ledger : [];
+  return {
+    count: entries.length,
+    recent: entries.slice(-limit).map((entry) => ({
+      at: entry.at || null,
+      target: entry.target || null,
+      outcome: entry.outcome || null,
+      status: entry.status || null,
+      operator: entry.operator || null,
+      requestedNextOwner: entry.requestedNextOwner || null,
+      requestedWorkstream: entry.requestedWorkstream || null,
+      riskFlags: entry.riskFlags || [],
+      stale: Boolean(entry.staleEvidence?.stale),
+      noLiveApproval: entry.noLiveApproval !== false,
+      terminalLedgerMarker: entry.terminalLedgerMarker || null,
+    })),
+  };
+}
+
 function emptyObservationWindowSummary() {
   return {
     total: 0,
@@ -701,6 +988,7 @@ function buildObservationEntry(pr, classification, plannedAction, now = new Date
     baseRefOid: pr?.baseRefOid || null,
     mergeable: pr?.mergeable || null,
     mergeStateStatus: pr?.mergeStateStatus || null,
+    reviewDecision: pr?.reviewDecision || null,
     failedCount: classification?.checks?.failed?.length || 0,
     pendingCount: classification?.checks?.pending?.length || 0,
   };
@@ -793,6 +1081,7 @@ function defaultState(target) {
     lastSeenBaseOid: null,
     lastMergeable: null,
     lastMergeStateStatus: null,
+    lastReviewDecision: null,
     lastFailureNames: [],
     lastPendingCount: 0,
     lastNotificationKey: null,
@@ -975,6 +1264,7 @@ export function buildStatusRows(targets, now = Date.now()) {
       lastKind: state.lastKind || null,
       lastMergeable: state.lastMergeable || null,
       lastMergeStateStatus: state.lastMergeStateStatus || null,
+      lastReviewDecision: state.lastReviewDecision || null,
       lastSeenHeadOid: state.lastSeenHeadOid || null,
       lastSeenBaseOid: state.lastSeenBaseOid || null,
       lastFailureNames: state.lastFailureNames || [],
@@ -983,6 +1273,8 @@ export function buildStatusRows(targets, now = Date.now()) {
       lastNotificationKey: state.lastNotificationKey || null,
       automaticAction: state.lastAutomaticActionExecution || (state.lastAutomaticActionPlan ? explainAutomaticActionPlan(state.lastAutomaticActionPlan) : null),
       actionLedger: summarizeActionLedger(state.actionLedger || []),
+      operatorDecisionLedger: summarizeOperatorDecisionLedger(state.operatorDecisionLedger || []),
+      lastOperatorDecisionFeedback: state.lastOperatorDecisionFeedback || null,
       observationSummary,
       recentRunAt: state.lastObservationAt || observationSummary.lastRunAt || state.lastRunAt || null,
       lastRunAt: state.lastRunAt || null,
@@ -1794,6 +2086,7 @@ function updateStateFromPr(state, pr, classification) {
   state.lastSeenBaseOid = pr.baseRefOid || state.lastSeenBaseOid;
   state.lastMergeable = pr.mergeable || null;
   state.lastMergeStateStatus = pr.mergeStateStatus || null;
+  state.lastReviewDecision = pr.reviewDecision || null;
   state.lastFailureNames = classification.checks.failed.map((c) => c.name);
   state.lastPendingCount = classification.checks.pending.length;
   if (classification.kind === 'clean') state.lastOkAt = state.lastRunAt;
@@ -1933,7 +2226,7 @@ function handleCheck(target, opts = {}) {
   maybeNotifySituationReport(target, state, pr, classification, now);
 
   saveJson(target.statePath, state);
-  const summary = { target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled, plannedAction, observationSummary: state.observationSummary, doctorWarnings: state.lastDoctorWarnings || [], nextRecommendedAction: state.nextRecommendedAction || null };
+  const summary = { target: target.id, kind: classification.kind, mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus, reviewDecision: pr.reviewDecision || null, failed: classification.checks.failed.length, pending: classification.checks.pending.length, rechecks, disabled: state.disabled, plannedAction, observationSummary: state.observationSummary, doctorWarnings: state.lastDoctorWarnings || [], nextRecommendedAction: state.nextRecommendedAction || null };
   if (opts.print !== false) console.log(JSON.stringify(summary, null, 2));
   return { target, state, pr, classification, summary };
 }
@@ -2420,6 +2713,64 @@ function handleRepairPlan(args = {}) {
   console.log(JSON.stringify(handoff, null, 2));
   if (handoff.terminalLedgerMarker === 'Block') process.exitCode = 1;
   return handoff;
+}
+
+function targetFromHandoff(handoff = {}, target = {}) {
+  return {
+    id: target.id || handoff.target || null,
+    pr: target.pr || handoff.pr || null,
+    url: target.url || handoff.url || null,
+    owner: target.owner || null,
+    repo: target.repo || null,
+    number: target.number || null,
+    headBranch: target.headBranch || handoff.expectedRefs?.headBranch || null,
+    baseBranch: target.baseBranch || handoff.expectedRefs?.baseBranch || null,
+    privatePaths: target.privatePaths || [],
+  };
+}
+
+function handleDecisionLedger(args = {}) {
+  const handoff = loadJson(resolve(args.handoff), null);
+  let target = targetFromHandoff(handoff);
+  let statePath = args.statePath || null;
+  let state = statePath ? loadJson(resolve(statePath), {}) : {};
+  let currentPr = args.prState ? loadJson(resolve(args.prState), {}) : null;
+  let classification = null;
+  if (args.config) {
+    const cfg = loadConfig(args.config);
+    const selected = selectTargets(cfg, args.targetSelectors, false);
+    if (selected.length !== 1) throw new Error('decision-ledger requires exactly one selected target when --config is used');
+    target = targetFromHandoff(handoff, selected[0]);
+    statePath = statePath || selected[0].statePath || null;
+    state = statePath ? { ...loadJson(resolve(statePath), {}) } : {};
+    if (!currentPr) {
+      const refreshed = ghPrViewWithUnknownRecheck(selected[0]);
+      currentPr = refreshed.pr;
+      classification = refreshed.classification;
+    }
+  }
+  if (!currentPr) currentPr = {};
+  classification = classification || classifyPr(currentPr);
+  const feedback = buildReviewStateFeedback(handoff, currentPr, state, {
+    target,
+    classification,
+    decision: args.decision,
+    operator: args.operator,
+    summary: args.summary,
+    nextOwner: args.nextOwner,
+    workstream: args.workstream,
+    focusedChecks: args.focusedChecks,
+    riskFlags: args.riskFlags,
+  });
+  appendOperatorDecisionLedgerEntry(state, target, feedback, new Date(feedback.createdAt));
+  if (statePath) saveJson(resolve(statePath), state);
+  if (args.output) {
+    assertNoOpenClawRuntimeContextPaths([normalizedRepoPath(args.output)], 'decision-ledger feedback artifact');
+    saveJson(resolve(args.output), feedback);
+  }
+  console.log(JSON.stringify({ ok: feedback.status !== 'blocked', feedback, operatorDecisionLedger: summarizeOperatorDecisionLedger(state.operatorDecisionLedger || []) }, null, 2));
+  if (feedback.terminalLedgerMarker === 'Block') process.exitCode = 1;
+  return feedback;
 }
 
 export function conflictSetKey(pr, baseOid, conflicts = []) {
@@ -2924,6 +3275,7 @@ export function main(argv = process.argv.slice(2)) {
     return report;
   }
   if (args.cmd === 'repair-plan') return handleRepairPlan(args);
+  if (args.cmd === 'decision-ledger') return handleDecisionLedger(args);
 
   const cfg = loadConfig(args.config);
   if (!args.allTargets && args.targetSelectors.length === 0 && cfg.targets.length > 1) {
