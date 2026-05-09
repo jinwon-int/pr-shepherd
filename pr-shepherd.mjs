@@ -20,6 +20,8 @@ export const OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES = [
 
 export const DEFAULT_SITUATION_REPORT_EVERY_MS = 6 * 60 * 60 * 1000;
 export const MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS = 60 * 60 * 1000;
+export const MINOR_AUTO_SAFE_REPAIR_SCOPE = 'minor-auto-safe-repair';
+export const SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS = Object.freeze(['merge-changelog-top-entry']);
 
 export const AUTOMATIC_ACTION_CLASSES = Object.freeze({
   RECHECK: 'recheck',
@@ -404,6 +406,7 @@ function validateAutomaticActions(errors, target, targetPath) {
     return;
   }
   const liveRepair = target.automaticActions.liveRepair;
+  validateMinorAutoRepair(errors, target, targetPath);
   if (liveRepair === undefined) return;
   const livePath = `${targetPath}.automaticActions.liveRepair`;
   if (!isPlainObject(liveRepair)) {
@@ -433,6 +436,184 @@ function validateAutomaticActions(errors, target, targetPath) {
   if (liveRepair.rehearsalMaxAgeMs !== undefined && (!Number.isFinite(Number(liveRepair.rehearsalMaxAgeMs)) || Number(liveRepair.rehearsalMaxAgeMs) <= 0)) errors.push(`${livePath}.rehearsalMaxAgeMs must be a positive number`);
   if (liveRepair.strictVerifyRequired !== undefined && typeof liveRepair.strictVerifyRequired !== 'boolean') errors.push(`${livePath}.strictVerifyRequired must be a boolean`);
   if (liveRepair.allowMaintainerOwnedBranches !== undefined && typeof liveRepair.allowMaintainerOwnedBranches !== 'boolean') errors.push(`${livePath}.allowMaintainerOwnedBranches must be a boolean`);
+}
+
+function minorAutoPathRiskReason(path) {
+  const normalized = normalizedRepoPath(path);
+  const lower = normalized.toLowerCase();
+  const name = basename(lower);
+  const runtimeContextPaths = findOpenClawRuntimeContextPaths([normalized]);
+  if (runtimeContextPaths.length > 0) return `OpenClaw runtime/bootstrap context path: ${runtimeContextPaths.join(', ')}`;
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized) || normalized.split('/').includes('..')) return 'path must be repo-relative and must not contain ..';
+  if (lower === '.github' || lower.startsWith('.github/')) return 'CI/workflow paths require approval';
+  if (lower === 'package.json' || lower.endsWith('/package.json') || DEFAULT_HUMAN_ONLY_CONFLICTS.includes(name)) return 'dependency or lockfile paths require approval';
+  if (/^(.+\.)?(env|npmrc|yarnrc|pypirc)$/.test(name) || /(^|\/)(config|configs|security|auth|secrets?)(\/|$)/.test(lower)) return 'security/auth/config paths require approval';
+  if (/\.(js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|swift|php|c|cc|cpp|h|hpp|cs|sh|bash|zsh|fish|ps1|sql|yaml|yml|toml|json|lock)$/i.test(normalized)) return 'source, executable, config, generated metadata, or structured data paths require approval in the default minor lane';
+  if (/^(changelog|changes|news|release-notes?)(\.|\/|$)/i.test(normalized)) return null;
+  if (/^(docs|documentation)\//i.test(normalized) && /\.(md|mdx|txt|rst)$/i.test(normalized)) return null;
+  if (/\.(md|mdx|txt|rst)$/i.test(normalized)) return null;
+  return 'path is not in the built-in minor documentation/changelog-safe class';
+}
+
+function minorAutoRepairPolicy(target = {}) {
+  return target.automaticActions?.minorAutoRepair || {};
+}
+
+function configuredMinorAutoPaths(policy = {}) {
+  return (Array.isArray(policy.pathAllowlist) ? policy.pathAllowlist : (Array.isArray(policy.paths) ? policy.paths : []))
+    .map((item) => normalizedRepoPath(item))
+    .filter(Boolean);
+}
+
+function configuredMinorAutoResolvers(policy = {}) {
+  return (Array.isArray(policy.resolverAllowlist) ? policy.resolverAllowlist : (Array.isArray(policy.resolvers) ? policy.resolvers : []))
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+}
+
+function pathMatchesAnyAllowlist(path, allowlist = []) {
+  const normalized = normalizedRepoPath(path);
+  return allowlist.some((allowed) => matchDiagnosisHintPath(allowed, normalized));
+}
+
+function rehearsalFreshForMinorAuto(target = {}, state = {}, pr = {}, now = Date.now(), maxAgeMs = DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS) {
+  const rehearsal = state.lastRepairRehearsal;
+  const rehearsalAt = Date.parse(rehearsal?.at || '');
+  const baseOid = currentBaseOid(state, pr);
+  const expectedRepairKey = repairPlanKey(pr, baseOid);
+  return Boolean(rehearsal
+    && Number.isFinite(rehearsalAt)
+    && now - rehearsalAt <= maxAgeMs
+    && (!rehearsal.target || rehearsal.target === target.id)
+    && rehearsal.headRefOid === pr?.headRefOid
+    && (!rehearsal.baseOid || rehearsal.baseOid === baseOid)
+    && rehearsal.repairKey === expectedRepairKey);
+}
+
+function validateMinorAutoRepair(errors, target, targetPath) {
+  const policy = target.automaticActions?.minorAutoRepair;
+  if (policy === undefined) return;
+  const policyPath = `${targetPath}.automaticActions.minorAutoRepair`;
+  if (!isPlainObject(policy)) {
+    errors.push(`${policyPath} must be an object`);
+    return;
+  }
+  if (policy.enabled !== undefined && typeof policy.enabled !== 'boolean') errors.push(`${policyPath}.enabled must be a boolean`);
+  if (policy.scope !== undefined && policy.scope !== MINOR_AUTO_SAFE_REPAIR_SCOPE) errors.push(`${policyPath}.scope must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE}`);
+  if (policy.actionClass !== undefined && policy.actionClass !== AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR) errors.push(`${policyPath}.actionClass must be auto-safe-repair`);
+  if (policy.zeroRehearsalSafe !== undefined && typeof policy.zeroRehearsalSafe !== 'boolean') errors.push(`${policyPath}.zeroRehearsalSafe must be a boolean`);
+  if (policy.requireRecentRehearsal !== undefined && typeof policy.requireRecentRehearsal !== 'boolean') errors.push(`${policyPath}.requireRecentRehearsal must be a boolean`);
+  if (policy.rehearsalMaxAgeMs !== undefined && (!Number.isFinite(Number(policy.rehearsalMaxAgeMs)) || Number(policy.rehearsalMaxAgeMs) <= 0)) errors.push(`${policyPath}.rehearsalMaxAgeMs must be a positive number`);
+  if (policy.branchAllowlist !== undefined && (!Array.isArray(policy.branchAllowlist) || !policy.branchAllowlist.every((item) => typeof item === 'string' && item.trim() !== ''))) {
+    errors.push(`${policyPath}.branchAllowlist must be a string array`);
+  }
+  const pathAllowlist = configuredMinorAutoPaths(policy);
+  if (policy.enabled === true) {
+    if (policy.scope !== MINOR_AUTO_SAFE_REPAIR_SCOPE) errors.push(`${policyPath}.scope must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE} when enabled`);
+    if (policy.actionClass !== AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR) errors.push(`${policyPath}.actionClass must be auto-safe-repair when enabled`);
+    if (pathAllowlist.length === 0) errors.push(`${policyPath}.pathAllowlist must be a non-empty string array when enabled`);
+    if (configuredMinorAutoResolvers(policy).length === 0) errors.push(`${policyPath}.resolverAllowlist must be a non-empty string array when enabled`);
+  }
+  if (policy.pathAllowlist !== undefined && (!Array.isArray(policy.pathAllowlist) || !policy.pathAllowlist.every((item) => typeof item === 'string' && item.trim() !== ''))) {
+    errors.push(`${policyPath}.pathAllowlist must be a string array`);
+  }
+  pathAllowlist.forEach((path, index) => {
+    validateConflictPolicyPath(errors, `${policyPath}.pathAllowlist[${index}]`, path);
+    const risk = minorAutoPathRiskReason(path.endsWith('/**') ? `${path.slice(0, -3)}/README.md` : path);
+    if (risk) errors.push(`${policyPath}.pathAllowlist[${index}] is not minor-auto-safe: ${risk}`);
+  });
+  const resolvers = configuredMinorAutoResolvers(policy);
+  if (policy.resolverAllowlist !== undefined && (!Array.isArray(policy.resolverAllowlist) || !policy.resolverAllowlist.every((item) => typeof item === 'string' && item.trim() !== ''))) {
+    errors.push(`${policyPath}.resolverAllowlist must be a string array`);
+  }
+  resolvers.forEach((resolver, index) => {
+    if (!SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS.includes(resolver)) errors.push(`${policyPath}.resolverAllowlist[${index}] is not supported for minor-auto-safe repair: ${resolver}`);
+  });
+}
+
+export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, classification = classifyPr(pr), fields = {}) {
+  const now = fields.now instanceof Date ? fields.now.getTime() : (fields.now === undefined ? Date.now() : Number(fields.now));
+  const policy = minorAutoRepairPolicy(target);
+  const pathAllowlist = configuredMinorAutoPaths(policy);
+  const resolverAllowlist = configuredMinorAutoResolvers(policy);
+  const verifyGate = buildVerifyGate(target);
+  const changedPaths = [...new Set((fields.changedPaths || []).map(normalizedRepoPath).filter(Boolean))].sort();
+  const branchAllowlist = Array.isArray(policy.branchAllowlist) ? policy.branchAllowlist.map((item) => String(item).trim()).filter(Boolean) : [];
+  const headBranch = target.headBranch || pr?.headRefName || '';
+  const selectedTargetCount = Number.isInteger(Number(fields.selectedTargetCount)) ? Number(fields.selectedTargetCount) : 1;
+  const contamination = findOpenClawRuntimeContextPaths([...(fields.changedPaths || []), ...(fields.artifactEvidencePaths || [])]);
+  const pushLimit = Number(target.autoPushLimit24h || 0);
+  const recentPushCount = recentAutoPushes(state, now).length;
+  const maxAgeMs = policy.rehearsalMaxAgeMs === undefined ? DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS : Number(policy.rehearsalMaxAgeMs);
+  const zeroRehearsalSafe = policy.zeroRehearsalSafe === true;
+  const requireRecentRehearsal = !zeroRehearsalSafe && policy.requireRecentRehearsal !== false;
+  const conflictEntries = Array.isArray(fields.conflictInfo?.entries) ? fields.conflictInfo.entries : [];
+  const reasons = [];
+  const gates = [];
+  const gate = (name, ok, reason, details = {}) => {
+    gates.push({ name, ok: Boolean(ok), reason: ok ? null : reason, ...details });
+    if (!ok && reason) reasons.push(reason);
+  };
+
+  gate('minor-auto-config-enabled', policy.enabled === true, 'automaticActions.minorAutoRepair.enabled is not true');
+  gate('minor-auto-scope', policy.scope === MINOR_AUTO_SAFE_REPAIR_SCOPE, `automaticActions.minorAutoRepair.scope must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE}`);
+  gate('action-class-auto-safe-repair', policy.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, 'automaticActions.minorAutoRepair.actionClass must be auto-safe-repair');
+  gate('single-target-only', selectedTargetCount === 1, 'minor-auto-safe repair may select exactly one target; broad --all mutation requires approval');
+  gate('dirty-current-pr', classification?.kind === 'dirty', `current classification ${classification?.kind || 'unknown'} is not dirty`);
+  gate('checks-pass-or-unrelated', (classification?.checks?.failed || []).length === 0 && (classification?.checks?.pending || []).length === 0, 'failed or pending checks block minor-auto-safe repair');
+  gate('strict-verify-gate', verifyGate.status !== 'missing', verifyGate.reason || 'strict verify gate is missing', { verifyGate });
+  gate('push-budget', Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit, '24h push budget is exhausted or not configured', { recentPushCount, pushLimit });
+  gate('branch-allowlist', branchAllowlist.length === 0 || (headBranch && branchAllowlist.includes(headBranch)), `head branch ${headBranch || '(unknown)'} is not in automaticActions.minorAutoRepair.branchAllowlist`, { headBranch });
+  gate('path-allowlist-configured', pathAllowlist.length > 0, 'automaticActions.minorAutoRepair.pathAllowlist is required');
+  gate('resolver-allowlist-configured', resolverAllowlist.length > 0, 'automaticActions.minorAutoRepair.resolverAllowlist is required');
+  gate('dry-run-preview', !requireRecentRehearsal || rehearsalFreshForMinorAuto(target, state, pr, now, maxAgeMs), 'fresh dry-run/rehearsal evidence is required before minor-auto-safe repair', { zeroRehearsalSafe, maxAgeMs });
+  if (fields.deferChangedPathGate === true && changedPaths.length === 0) {
+    gate('changed-paths-within-allowlist', true, null, { deferred: true, pathAllowlist });
+  } else {
+    gate('changed-paths-present', changedPaths.length > 0, 'exact changed paths are required for minor-auto-safe repair');
+    const outside = changedPaths.filter((path) => !pathMatchesAnyAllowlist(path, pathAllowlist));
+    gate('changed-paths-within-allowlist', outside.length === 0, `changed paths outside automaticActions.minorAutoRepair.pathAllowlist: ${outside.join(', ')}`, { changedPaths, pathAllowlist, outside });
+    const risky = changedPaths.map((path) => ({ path, reason: minorAutoPathRiskReason(path) })).filter((item) => item.reason);
+    gate('changed-path-risk-class', risky.length === 0, `changed paths require approval: ${risky.map((item) => `${item.path} (${item.reason})`).join(', ')}`, { risky });
+  }
+  if (conflictEntries.length > 0) {
+    const badResolvers = conflictEntries
+      .filter((entry) => entry.tier !== 'autoSafe' || !resolverAllowlist.includes(entry.policy?.resolver))
+      .map((entry) => ({ path: entry.path, tier: entry.tier, resolver: entry.policy?.resolver || null }));
+    gate('resolver-identity-allowlist', badResolvers.length === 0, `conflict resolvers are not minor-auto-safe allowlisted: ${badResolvers.map((entry) => `${entry.path}:${entry.resolver || entry.tier}`).join(', ')}`, { badResolvers });
+  }
+  gate('contamination-guard', contamination.length === 0, `OpenClaw runtime/bootstrap context paths would enter branch diff or artifact evidence: ${contamination.join(', ')}`, { offendingPaths: contamination });
+
+  const blockedReasons = [...new Set(reasons)];
+  return redactLedgerValue({
+    schema: 'pr-shepherd-minor-auto-repair-gate/v1',
+    createdAt: new Date(now).toISOString(),
+    lane: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    gateAllowed: blockedReasons.length === 0,
+    status: blockedReasons.length === 0 ? 'auto-repaired' : (policy.enabled === true ? 'blocked-risk' : 'blocked-needs-approval'),
+    blockedReasons,
+    gates,
+    actionClass: blockedReasons.length === 0 ? AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR : AUTOMATIC_ACTION_CLASSES.BLOCK,
+    requiresOperatorApproval: blockedReasons.length > 0,
+    zeroRehearsalSafe,
+    changedPaths,
+    pathAllowlist,
+    resolverAllowlist,
+    verifyGate,
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      offendingRuntimeContextPaths: contamination,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    operatorSummary: blockedReasons.length === 0
+      ? 'auto-repaired: bounded minor-auto-safe gates passed; push remains protected by expected-head force-with-lease'
+      : `${policy.enabled === true ? 'blocked-risk' : 'blocked-needs-approval'}: ${blockedReasons.join('; ')}`,
+    terminalLedgerMarker: blockedReasons.length === 0 ? 'Done' : 'Block',
+  }, target);
 }
 
 function validateMultiTargetLiveRepair(errors, cfg) {
@@ -2270,21 +2451,40 @@ export function planAutomaticAction(target, state = {}, pr = {}, classification 
         ],
       });
     }
-    const gateFailures = liveRepairGateFailures(target, state, pr, opts.now === undefined ? Date.now() : opts.now);
-    if (gateFailures.length > 0) {
-      return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.BLOCK, {
+    const now = opts.now === undefined ? Date.now() : opts.now;
+    const gateFailures = liveRepairGateFailures(target, state, pr, now);
+    if (gateFailures.length === 0) {
+      return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, {
         ...base,
-        allowed: false,
+        lane: 'approval-required-auto-safe-repair',
+        pushAllowed: true,
+        mutatesBranch: true,
         requiresOperatorApproval: true,
-        reasons: gateFailures,
+        reasons: ['all live auto-safe repair gates passed'],
       });
     }
-    return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, {
+    const minorGate = buildMinorAutoRepairGate(target, state, pr, classification, {
+      now,
+      deferChangedPathGate: true,
+      selectedTargetCount: opts.selectedTargetCount,
+    });
+    if (minorGate.gateAllowed) {
+      return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, {
+        ...base,
+        lane: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+        pushAllowed: true,
+        mutatesBranch: true,
+        requiresOperatorApproval: false,
+        minorAutoRepairGate: minorGate,
+        reasons: ['all minor-auto-safe repair gates passed; exact changed-path guard deferred until immediately before push'],
+      });
+    }
+    return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.BLOCK, {
       ...base,
-      pushAllowed: true,
-      mutatesBranch: true,
+      allowed: false,
       requiresOperatorApproval: true,
-      reasons: ['all live auto-safe repair gates passed'],
+      minorAutoRepairGate: minorGate,
+      reasons: [...gateFailures, ...minorGate.blockedReasons],
     });
   }
   if (kind === 'unknown') {
@@ -3740,6 +3940,7 @@ function handleRepair(target, dryRun, opts = {}) {
     run('git', ['fetch', 'origin', target.headBranch], { cwd: target.worktreePath });
     const remoteHead = run('git', ['rev-parse', `origin/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim();
     run('git', ['checkout', '-B', target.headBranch, `origin/${target.headBranch}`], { cwd: target.worktreePath });
+    let resolvedConflictInfo = null;
     const rebase = run('git', ['rebase', `upstream/${target.baseBranch}`], { cwd: target.worktreePath, allowFailure: true });
     if (rebase.status !== 0) {
       const conflicts = runShell('git diff --name-only --diff-filter=U', target.worktreePath, { allowFailure: true }).stdout.trim().split('\n').filter(Boolean);
@@ -3774,6 +3975,7 @@ function handleRepair(target, dryRun, opts = {}) {
       }).result;
       if (canResolveAutomatically) state.lastAutomaticActionExecution = automaticActionExecution(conflictPlan, 'executed', { result: true });
       if (canResolveAutomatically) {
+        resolvedConflictInfo = conflictInfo;
         run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: target.worktreePath });
       } else {
         const diagnosisBundle = () => buildConflictDiagnosisBundle(target, { ...pr, baseRefOid: baseOid }, classification, state, {
@@ -3825,6 +4027,42 @@ function handleRepair(target, dryRun, opts = {}) {
     }
 
     runFocusedChecks(target);
+    const changedPaths = run('git', ['diff', '--name-only', `upstream/${target.baseBranch}...HEAD`], { cwd: target.worktreePath }).stdout
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    if (postFetchPlan.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE) {
+      const minorGate = buildMinorAutoRepairGate(target, state, { ...pr, baseRefOid: baseOid }, classification, {
+        now: Date.now(),
+        changedPaths,
+        conflictInfo: resolvedConflictInfo,
+        artifactEvidencePaths: opts.artifactDir ? [normalizedRepoPath(opts.artifactDir)] : [],
+      });
+      state.lastMinorAutoRepairGate = minorGate;
+      state.lastMinorAutoRepairPreview = minorGate;
+      if (!minorGate.gateAllowed) {
+        state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'block', {
+          state,
+          result: minorGate.status,
+          repairKey,
+          baseOid,
+          actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
+          blockReason: minorGate.blockedReasons.join('; '),
+          operatorSummary: minorGate.operatorSummary,
+        });
+        state.lastActionSummary = minorGate.operatorSummary;
+        appendPlanLedgerEntry(state, target, postFetchPlan, 'blocked', {
+          repairKey,
+          expectedHeadOid: pr.headRefOid || null,
+          expectedBaseOid: baseOid,
+          rollbackNote: 'minor-auto-safe repair blocked before push; no branch mutation pushed',
+          details: { minorAutoRepairGate: minorGate },
+        });
+        notify(target, state, `minor-auto-block:${repairKey}`, `${target.pr} ${minorGate.operatorSummary}`, true);
+        saveJson(target.statePath, state);
+        throw new Error(`minor-auto-safe repair blocked: ${minorGate.blockedReasons.join('; ')}`);
+      }
+    }
     assertNoOpenClawRuntimeContextInBranch(target, `upstream/${target.baseBranch}`);
 
     const ls = run('git', ['ls-remote', 'origin', `refs/heads/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
@@ -3832,7 +4070,8 @@ function handleRepair(target, dryRun, opts = {}) {
     run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
     const pushedAt = new Date();
-    state.autoPushes = [...pushes24h, { at: pushedAt.toISOString(), from: remoteHead, to: newHead, reason: 'dirty-rebase' }];
+    const minorAutoLane = postFetchPlan.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE;
+    state.autoPushes = [...pushes24h, { at: pushedAt.toISOString(), from: remoteHead, to: newHead, reason: minorAutoLane ? MINOR_AUTO_SAFE_REPAIR_SCOPE : 'dirty-rebase' }];
     consumeLiveRepairApproval(state, target, 'pushed', 'auto-safe-repair pushed', pushedAt);
     state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'pushed', {
       state,
@@ -3840,18 +4079,22 @@ function handleRepair(target, dryRun, opts = {}) {
       baseOid,
       beforeHeadOid: remoteHead,
       afterHeadOid: newHead,
-      operatorSummary: `${target.pr} repair pushed with force-with-lease; disable one-shot approval and verify PR/CI state.`,
+      operatorSummary: minorAutoLane
+        ? `${target.pr} auto-repaired minor-auto-safe changes with force-with-lease; verify PR/CI state.`
+        : `${target.pr} repair pushed with force-with-lease; disable one-shot approval and verify PR/CI state.`,
     });
-    state.lastActionSummary = `repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`;
+    state.lastActionSummary = minorAutoLane
+      ? `auto-repaired minor-auto-safe changes with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`
+      : `repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`;
     appendPlanLedgerEntry(state, target, postFetchPlan, 'pushed', {
       repairKey,
       expectedHeadOid: pr.headRefOid || null,
       expectedBaseOid: baseOid,
-      details: { from: remoteHead, to: newHead, push: 'force-with-lease' },
+      details: { from: remoteHead, to: newHead, push: 'force-with-lease', lane: postFetchPlan.lane || 'approval-required-auto-safe-repair' },
     });
     delete state.lastRepairFailureKey;
     delete state.lastConflictSetKey;
-    notify(target, state, `repair-success:${remoteHead}:${newHead}`, `${target.pr} repair pushed with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`, true);
+    notify(target, state, `repair-success:${remoteHead}:${newHead}`, `${target.pr} ${minorAutoLane ? 'auto-repaired minor-auto-safe changes' : 'repair pushed'} with force-with-lease ${remoteHead.slice(0, 8)}..${newHead.slice(0, 8)}`, true);
     saveJson(target.statePath, state);
     handleCheck(target);
   } catch (err) {
