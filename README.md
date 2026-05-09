@@ -395,6 +395,20 @@ evidence, and again before PR creation, the final diff and planned evidence path
 runtime/bootstrap denylist; fail closed on `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
 `IDENTITY.md`, or `.openclaw/**`, reporting only exact repo-relative offending paths.
 
+### Phase N minor-auto execution controller operations
+
+Phase N documents the built-in controller path for a preconfigured `automaticActions.minorAutoRepair` target. Use
+[`phase-n-minor-auto-execution-controller.md`](examples/field-deploy/phase-n-minor-auto-execution-controller.md) when
+one selected dirty PR has `scope="minor-auto-safe-repair"`, `actionClass="auto-safe-repair"`, branch/path/resolver
+allowlists, focused verification, push budget, and fresh rehearsal evidence or explicit `zeroRehearsalSafe=true`.
+
+The controller plans first, then dispatches only the minor-auto `auto-safe-repair` lane, runs focused checks, computes
+exact changed paths and resolver identities, re-runs the minor-auto gate immediately before push, blocks on any
+allowlist/risk/evidence contamination failure, verifies the expected remote head, and pushes only with
+`--force-with-lease`. Phase N starts with `Start`, closes with `Done` or `Block`, and records sanitized gate/audit
+evidence. It does not permit multi-target mutation, failed or pending CI repair, allowlist widening during execution,
+broad live repair, or retries after drift without a fresh Start marker and fresh gates.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
@@ -797,8 +811,9 @@ no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*`
 a config `notify` fragment for full reports on every 10-minute check, Phase A standing-operations
 runbook with state/evidence rotation and 24-48h observation templates, Phase B observation/noise-control,
 Phase C rehearsal, Phase D operator decision, Phase E execution/audit, Phase F fleet-safe limited autonomy,
-Phase G diagnose-only context, Phase H repair-plan handoff, Phase I review-state feedback, and Phase J supervised
-rehearsal queue runbooks, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install
+Phase G diagnose-only context, Phase H repair-plan handoff, Phase I review-state feedback, Phase J supervised
+rehearsal queue, Phase K rehearsal evidence digest, Phase L operator packet, Phase M bounded minor repair, and Phase N
+minor-auto execution controller runbooks, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install
 sketch. Keep the copied env file and Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
