@@ -40,6 +40,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   a non-mutating operator packet without treating review approval as live repair approval.
 - `phase-j-supervised-rehearsal-queue.md` — Phase J runbook for supervising a one-at-a-time dry-run rehearsal
   queue and packet without live repair approval, timers, branch mutation, or pushes.
+- `phase-k-rehearsal-evidence-digest.md` — Phase K runbook for converting one completed dry-run rehearsal into a
+  sanitized evidence digest and fail-closed Phase D candidate gate.
 
 ## Safe install sketch
 
@@ -228,6 +230,16 @@ with exactly one of `PR: <url>`, `Done`, or `Block`, returns `startCommentUrl` p
 available, and blocks before PR/evidence publication on stale feedback, `CHANGES_REQUESTED`, non-dirty PR state, ref
 drift, live repair commands, or OpenClaw runtime/bootstrap context evidence. Phase J never runs live `repair`, creates
 standing timers, pushes, or carries approval into Phase D/E.
+
+## Phase K rehearsal evidence digest
+
+Use `phase-k-rehearsal-evidence-digest.md` after a supervised dry-run rehearsal finishes and before preparing any
+Phase D operator packet. Phase K records a `pr-shepherd-rehearsal-evidence-digest/v1` with a
+`pr-shepherd-phase-d-candidate-gate/v1`, current refs, repair key, check counts, evidence expiry, focused-check gate,
+and contamination guard. `candidateAllowed=true` means only that a Phase D packet may be prepared; it does not approve
+live repair. It starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or `Block`, returns
+`startCommentUrl` plus the matching terminal URL when available, and blocks on stale/mismatched evidence, missing
+rehearsal ledger, missing focused checks, or OpenClaw runtime/bootstrap context evidence.
 
 ## Field doctor
 

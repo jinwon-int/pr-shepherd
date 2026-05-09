@@ -325,6 +325,22 @@ runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEAR
 `.openclaw/**`) block the queue with exact offending repo-relative paths. Phase J may queue a dry-run rehearsal, but
 it never runs live `repair`, creates standing timers, pushes, or carries approval into Phase D/E.
 
+### Phase K rehearsal evidence digest
+
+Phase K converts one completed supervised dry-run into a compact `pr-shepherd-rehearsal-evidence-digest/v1` and a
+fail-closed `pr-shepherd-phase-d-candidate-gate/v1`. Use
+[`phase-k-rehearsal-evidence-digest.md`](examples/field-deploy/phase-k-rehearsal-evidence-digest.md) after
+`rehearse --target <id>` and before preparing any Phase D operator packet. The digest records only sanitized target,
+PR, expected/current refs, repair key, check counts, approval-package summary, freshness, rollback note, and evidence
+hygiene.
+
+`candidateAllowed=true` means the rehearsal is eligible to become Phase D input; it is not live repair approval and
+still cannot bypass Phase D/E one-shot metadata, focused checks, push budget, expected-head `--force-with-lease`, or a
+fresh contamination check. Missing rehearsal package/ledger entries, non-dirty current PR state, stale or mismatched
+refs, expired evidence, missing strict focused checks, or runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`,
+`USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`) close as `Block` with exact repo-relative
+offending paths or blocked reasons.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
