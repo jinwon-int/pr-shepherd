@@ -430,6 +430,32 @@ execution, auto-merge, fix-until-green loops, provider sends, Gateway restarts, 
 future branch push; every live repair still needs a fresh Phase N controller run and final gates, and
 major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
+### Advanced automation roadmap validation/risk posture
+
+Future Phase P/Q/R/S work must preserve Phase O as the safety floor. Treat auto-merge, bounded fix-until-green, and
+risky auto-push as separate, default-off policy lanes with independent validation, not as one increasingly permissive
+automation flag.
+
+- **Phase P / minor-auto auto-merge**: allow only PRs proven to be post-push minor-auto outputs, and revalidate at the
+  final merge moment. Block unless required checks are clean, branch protection and review policy are satisfied, refs
+  are fresh, merge method/target branch are explicitly configured, changed paths and resolver identity still match the
+  minor-auto allowlist, and no risky labels, comments, checks, or runtime/bootstrap paths are present.
+- **Phase Q / bounded fix-until-green**: model as a constrained retry controller, not a repair loop. Validation should
+  require a max-attempt cap (prefer one, cap two), the same target/path/resolver/risk class for every attempt, a fresh
+  diff summary and focused checks per attempt, and a circuit breaker on drift, new file classes, reviewer objection,
+  stale refs, failed preconditions, or budget exhaustion.
+- **Phase R / risky approval-prepared push**: generate a complete approval packet before mutation. The packet must name
+  the exact diff scope, command argv, expected head/lease, approval scope and expiry, focused checks, rollback/disable
+  plan, notification target, and sanitized risk evidence; one approval authorizes exactly one bounded push.
+- **Phase S / optional risky unattended governance**: keep separate from Phase R and unsuitable as a default. It should
+  require fleet-level policy, explicit per-target/user enablement, prominent audit output, fast stop controls, and
+  operator-visible rollback guidance.
+
+Config validation should fail closed for auto-merge without minor-auto provenance, retry without attempt and budget
+limits, risky push without explicit approval scope, broad `--all` mutation, missing focused checks, pending/unknown or
+failed check ambiguity, secret/private-path evidence, or any OpenClaw runtime/bootstrap context path in branch diffs or
+artifact evidence.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
