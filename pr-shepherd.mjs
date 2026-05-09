@@ -84,7 +84,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs decision-ledger --handoff path --decision outcome [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearsal-queue --feedback path [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs decision-ledger --handoff path --decision outcome [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearsal-queue --feedback path [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs phase-d-packet --config config.json [--target id|owner/repo#number] [--pr-state path] [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
   process.exit(exitCode);
 }
 
@@ -95,7 +95,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'decision-ledger', 'rehearsal-queue', 'repair', 'rehearse'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'decision-ledger', 'rehearsal-queue', 'phase-d-packet', 'repair', 'rehearse'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -115,8 +115,15 @@ function parseArgs(argv) {
     workstream: null,
     queueName: null,
     priority: null,
+    preparedBy: null,
+    configRevision: null,
+    phaseBSummary: null,
+    phaseCRehearsalEvidence: null,
+    decisionDeadline: null,
     focusedChecks: [],
     riskFlags: [],
+    branchDiffPaths: [],
+    artifactEvidencePaths: [],
     targetSelectors: [],
     allTargets: false,
   };
@@ -144,8 +151,15 @@ function parseArgs(argv) {
     else if (a === '--workstream') args.workstream = requireValue(a, rest[++i]);
     else if (a === '--queue-name') args.queueName = requireValue(a, rest[++i]);
     else if (a === '--priority') args.priority = requireValue(a, rest[++i]);
+    else if (a === '--prepared-by') args.preparedBy = requireValue(a, rest[++i]);
+    else if (a === '--config-revision') args.configRevision = requireValue(a, rest[++i]);
+    else if (a === '--phase-b-summary') args.phaseBSummary = requireValue(a, rest[++i]);
+    else if (a === '--phase-c-evidence' || a === '--phase-c-rehearsal-evidence') args.phaseCRehearsalEvidence = requireValue(a, rest[++i]);
+    else if (a === '--decision-deadline' || a === '--expires-at') args.decisionDeadline = requireValue(a, rest[++i]);
     else if (a === '--focused-check') args.focusedChecks.push(requireValue(a, rest[++i]));
     else if (a === '--risk') args.riskFlags.push(requireValue(a, rest[++i]));
+    else if (a === '--branch-diff-path') args.branchDiffPaths.push(requireValue(a, rest[++i]));
+    else if (a === '--artifact-evidence-path') args.artifactEvidencePaths.push(requireValue(a, rest[++i]));
     else if (a === '--output') args.output = requireValue(a, rest[++i]);
     else if (a === '--help' || a === '-h') usage(0);
     else throw new Error(`Unknown argument: ${a}`);
@@ -159,6 +173,9 @@ function parseArgs(argv) {
   } else if (args.cmd === 'rehearsal-queue') {
     if (!args.feedback) usage();
     if (args.allTargets) throw new Error('rehearsal-queue records one supervised dry-run packet at a time; --all is not supported');
+  } else if (args.cmd === 'phase-d-packet') {
+    if (!args.config) usage();
+    if (args.allTargets) throw new Error('phase-d-packet assembles one operator packet at a time; --all is not supported');
   } else if (!args.config) usage();
   if (args.cmd === 'rehearse') {
     args.dryRun = true;
@@ -557,6 +574,9 @@ function redact(text) {
 }
 
 function configuredPrivatePathLabels(target = {}) {
+  const privatePaths = Array.isArray(target.privatePaths)
+    ? target.privatePaths.map((value, index) => [`<private-path-${index + 1}>`, value])
+    : [];
   const candidates = [
     ['<worktree-root>', target.worktreePath],
     ['<state-file>', target.statePath],
@@ -564,6 +584,7 @@ function configuredPrivatePathLabels(target = {}) {
     ['<lock-file>', target.lockPath],
     ['<lock-root>', target.lockPath && dirname(target.lockPath)],
     ['<artifact-root>', target.artifactDir],
+    ...privatePaths,
   ];
   return candidates
     .filter(([, value]) => typeof value === 'string' && value.trim().startsWith('/'))
@@ -1968,6 +1989,163 @@ export function buildRehearsalEvidenceDigest(target = {}, pr = {}, state = {}, f
   return redactLedgerValue(digest, target);
 }
 
+function phaseDOperatorPacketId(packet = {}) {
+  const refs = packet.expectedRefs || {};
+  return [
+    'phase-d-packet',
+    packet.target || 'target',
+    packet.sourceDigest?.digestId || packet.createdAt || 'digest',
+    refs.repairKey || 'repair-key',
+  ].join(':');
+}
+
+export function buildPhaseDOperatorPacket(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const classification = fields.classification || classifyPr(pr || {});
+  const rehearsal = fields.rehearsal || state.lastRepairRehearsal || {};
+  const digest = fields.rehearsalEvidenceDigest || state.lastRehearsalEvidenceDigest || rehearsal.evidenceDigest || null;
+  const phaseDCandidateGate = fields.phaseDCandidateGate || digest?.phaseDCandidateGate || buildPhaseDCandidateGate(target, pr, state, { ...fields, now, rehearsal, classification });
+  const approvalPackage = fields.approvalPackage || rehearsal.approvalPackage || {};
+  const baseOid = fields.baseOid || currentBaseOid(state, pr);
+  const expectedRefs = {
+    ...(approvalPackage.expectedRefs || {}),
+    ...(digest?.expectedRefs || {}),
+    ...(phaseDCandidateGate.expectedRefs || {}),
+  };
+  const repairKey = expectedRefs.repairKey || rehearsal.repairKey || repairPlanKey(pr, baseOid);
+  const headBranch = target.headBranch || pr.headRefName || expectedRefs.headBranch || null;
+  const verifyGate = buildVerifyGate(target);
+  const branchDiffPaths = Array.isArray(fields.branchDiffPaths) ? fields.branchDiffPaths.map(normalizedRepoPath).filter(Boolean) : [];
+  const artifactEvidencePaths = Array.isArray(fields.artifactEvidencePaths) ? fields.artifactEvidencePaths.map(normalizedRepoPath).filter(Boolean) : [];
+  const contamination = findOpenClawRuntimeContextPaths([
+    ...branchDiffPaths,
+    ...artifactEvidencePaths,
+    ...(digest?.evidenceHygiene?.offendingRuntimeContextPaths || []),
+    ...(phaseDCandidateGate?.evidenceHygiene?.offendingRuntimeContextPaths || []),
+  ]);
+  const pushLimit = Number(target.autoPushLimit24h || 0);
+  const recentPushCount = recentAutoPushes(state, now.getTime()).length;
+  const gates = [
+    phaseEGate('phase-k-rehearsal-evidence-digest', digest?.schema === 'pr-shepherd-rehearsal-evidence-digest/v1', {
+      reason: 'Phase K rehearsal evidence digest is required before assembling a Phase D operator packet',
+      schema: digest?.schema || null,
+    }),
+    phaseEGate('phase-d-candidate-gate', phaseDCandidateGate?.schema === 'pr-shepherd-phase-d-candidate-gate/v1' && phaseDCandidateGate.candidateAllowed === true, {
+      reason: `Phase D candidate gate is blocked: ${(phaseDCandidateGate?.blockedReasons || []).join('; ') || 'candidateAllowed is not true'}`,
+      candidateAllowed: phaseDCandidateGate?.candidateAllowed === true,
+    }),
+    phaseEGate('current-pr-dirty', classification?.kind === 'dirty', {
+      reason: `current classification ${classification?.kind || 'unknown'} is not dirty; Phase D packets only request live repair for dirty auto-safe candidates`,
+      classification: classification?.kind || 'unknown',
+    }),
+    phaseEGate('rehearsal-approval-package', approvalPackage?.schema === 'pr-shepherd-repair-rehearsal-approval/v1', {
+      reason: 'repair rehearsal approval package is required for the Phase D packet approval template',
+      schema: approvalPackage?.schema || null,
+    }),
+    phaseEGate('target-and-refs-match', (!digest?.target || !target.id || digest.target === target.id)
+      && (!expectedRefs.headRefOid || expectedRefs.headRefOid === (pr.headRefOid || state.lastSeenHeadOid || null))
+      && (!expectedRefs.baseRefOid || expectedRefs.baseRefOid === (baseOid || null))
+      && (!expectedRefs.repairKey || expectedRefs.repairKey === repairKey), {
+      reason: 'target, expected head/base refs, or repairKey do not match current PR state',
+      expectedRefs,
+      currentRefs: {
+        headRefOid: pr.headRefOid || state.lastSeenHeadOid || null,
+        baseRefOid: baseOid || null,
+        repairKey,
+      },
+    }),
+    phaseEGate('strict-verify-gate', verifyGate.status !== 'missing', {
+      reason: verifyGate.reason || 'strict verify gate is satisfied',
+      verifyGate,
+    }),
+    phaseEGate('push-budget-known', Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit, {
+      reason: '24h push budget is exhausted or not configured',
+      recentPushCount,
+      pushLimit,
+    }),
+    phaseEGate('contamination-guard', contamination.length === 0, {
+      reason: `OpenClaw runtime/bootstrap context paths would enter Phase D packet branch diff or artifact evidence: ${contamination.join(', ')}`,
+      offendingPaths: contamination,
+    }),
+  ];
+  const blockedReasons = phaseEBlockedReasons(gates, null);
+  const liveRepairCommand = approvalPackage.liveRepairCommand || renderedCommand('repair', target, fields);
+  const packet = {
+    schema: 'pr-shepherd-phase-d-operator-packet/v1',
+    packetId: null,
+    createdAt: now.toISOString(),
+    phase: 'D',
+    target: target.id || digest?.target || null,
+    pr: targetPrRef(target) || target.pr || digest?.pr || null,
+    url: target.url || digest?.url || pr.url || null,
+    requestedDecision: 'GO live repair / NO-GO continue observation / NO-GO block',
+    status: blockedReasons.length === 0 ? 'ready-for-operator' : 'blocked',
+    packetAllowed: blockedReasons.length === 0,
+    blockedReasons,
+    actionClass: blockedReasons.length === 0 ? AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR : AUTOMATIC_ACTION_CLASSES.BLOCK,
+    dryRunEvidenceOnly: true,
+    productionMutation: false,
+    mutatesBranch: false,
+    pushAllowed: false,
+    noLiveApproval: true,
+    preparedBy: fields.preparedBy || null,
+    operator: fields.operator || null,
+    configRevision: fields.configRevision || null,
+    phaseBSummary: fields.phaseBSummary || null,
+    phaseCRehearsalEvidence: fields.phaseCRehearsalEvidence || digest?.digestId || null,
+    currentStatus: classification?.kind || 'unknown',
+    expectedRefs: {
+      ...expectedRefs,
+      headBranch,
+      baseBranch: target.baseBranch || pr.baseRefName || expectedRefs.baseBranch || null,
+      headRefOid: expectedRefs.headRefOid || pr.headRefOid || state.lastSeenHeadOid || null,
+      baseRefOid: expectedRefs.baseRefOid || baseOid || null,
+      repairKey,
+    },
+    allowedBranch: headBranch ? (target.headOwner ? `${target.headOwner}:${headBranch}` : headBranch) : null,
+    liveCommandUnderConsideration: liveRepairCommand,
+    focusedChecksRequiredBeforePush: verifyGate.commands,
+    pushGuard: {
+      forceWithLease: headBranch && (expectedRefs.headRefOid || pr.headRefOid) ? `${headBranch}:${expectedRefs.headRefOid || pr.headRefOid}` : null,
+      expectedHeadOid: expectedRefs.headRefOid || pr.headRefOid || null,
+    },
+    pushBudgetRemaining: Number.isFinite(pushLimit) && pushLimit > 0 ? Math.max(0, pushLimit - recentPushCount) : 0,
+    decisionDeadline: fields.decisionDeadline || approvalPackage.evidenceBundle?.evidenceExpiresAt || null,
+    gates,
+    sourceDigest: digest ? {
+      schema: digest.schema || null,
+      digestId: digest.digestId || null,
+      createdAt: digest.createdAt || null,
+      terminalLedgerMarker: digest.terminalLedgerMarker || null,
+    } : null,
+    approvalConfigTemplate: approvalPackage.approvalConfigTemplate || null,
+    operatorChecklist: [
+      'Post Start before recording the Phase D decision packet, and close with exactly one PR, Done, or Block marker.',
+      'Choose exactly one decision: GO live repair, NO-GO continue observation/rehearsal, or NO-GO block.',
+      'If GO, record target-specific one-shot auto-safe-repair approval metadata before running the listed live command.',
+      'Do not run broad --all repair, standing timers, manual git push, or any command outside liveCommandUnderConsideration.',
+      'Fail closed if expected refs, target, branch, focused checks, push budget, or contamination gates change.',
+    ],
+    closeout: {
+      startMarker: 'Start',
+      terminalMarkers: ['PR: <url>', 'Done', 'Block'],
+      returnFields: ['startCommentUrl', 'prUrl', 'doneCommentUrl', 'blockCommentUrl'],
+    },
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      plannedBranchDiffPaths: branchDiffPaths.slice().sort(),
+      plannedArtifactEvidencePaths: artifactEvidencePaths.slice().sort(),
+      offendingRuntimeContextPaths: contamination,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    terminalLedgerMarker: blockedReasons.length === 0 ? 'Done' : 'Block',
+  };
+  packet.packetId = fields.id || phaseDOperatorPacketId(packet);
+  return redactLedgerValue(packet, target);
+}
+
 function buildAutomaticActionPlan(actionClass, fields = {}) {
   const plan = {
     actionClass,
@@ -3162,6 +3340,43 @@ function handleDecisionLedger(args = {}) {
   return feedback;
 }
 
+function handlePhaseDOperatorPacket(args = {}) {
+  const cfg = loadConfig(args.config);
+  const selected = selectTargets(cfg, args.targetSelectors, false);
+  if (selected.length !== 1) throw new Error('phase-d-packet requires exactly one selected target');
+  const target = selected[0];
+  const statePath = args.statePath || target.statePath || null;
+  const state = statePath ? { ...loadJson(resolve(statePath), {}) } : {};
+  let currentPr = args.prState ? loadJson(resolve(args.prState), {}) : null;
+  let classification = null;
+  if (!currentPr) {
+    const refreshed = ghPrViewWithUnknownRecheck(target);
+    currentPr = refreshed.pr;
+    classification = refreshed.classification;
+  }
+  classification = classification || classifyPr(currentPr || {});
+  const packet = buildPhaseDOperatorPacket(target, currentPr || {}, state, {
+    classification,
+    operator: args.operator,
+    preparedBy: args.preparedBy,
+    configRevision: args.configRevision,
+    phaseBSummary: args.phaseBSummary,
+    phaseCRehearsalEvidence: args.phaseCRehearsalEvidence,
+    decisionDeadline: args.decisionDeadline,
+    branchDiffPaths: args.branchDiffPaths,
+    artifactEvidencePaths: args.artifactEvidencePaths,
+  });
+  state.lastPhaseDOperatorPacket = packet;
+  if (statePath) saveJson(resolve(statePath), state);
+  if (args.output) {
+    assertNoOpenClawRuntimeContextPaths([normalizedRepoPath(args.output)], 'Phase D operator packet artifact');
+    saveJson(resolve(args.output), packet);
+  }
+  console.log(JSON.stringify({ ok: packet.packetAllowed, packet }, null, 2));
+  if (packet.terminalLedgerMarker === 'Block') process.exitCode = 1;
+  return packet;
+}
+
 function handleRehearsalQueue(args = {}) {
   const feedback = loadJson(resolve(args.feedback), null);
   let target = targetFromFeedback(feedback);
@@ -3718,6 +3933,7 @@ export function main(argv = process.argv.slice(2)) {
   if (args.cmd === 'repair-plan') return handleRepairPlan(args);
   if (args.cmd === 'decision-ledger') return handleDecisionLedger(args);
   if (args.cmd === 'rehearsal-queue') return handleRehearsalQueue(args);
+  if (args.cmd === 'phase-d-packet') return handlePhaseDOperatorPacket(args);
 
   const cfg = loadConfig(args.config);
   if (!args.allTargets && args.targetSelectors.length === 0 && cfg.targets.length > 1) {
