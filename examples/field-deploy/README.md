@@ -34,6 +34,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   tiers, expansion/rollback rules, and the standing prohibition on live repair automation.
 - `phase-g-diagnose-only-conflict-context.md` — Phase G runbook for diagnose-only operations, conflict context
   bundles, sandbox-only evidence collection, and safe per-repo diagnosis hints.
+- `phase-h-repair-plan-handoff.md` — Phase H runbook for converting diagnose-only evidence into a repair-plan
+  handoff packet without branch mutation or approval carry-forward.
 
 ## Safe install sketch
 
@@ -190,6 +192,14 @@ Phase G is non-mutating: it may collect source-backed PR metadata, check summari
 hints, and trimmed sandbox conflict context, but it must not push, edit the watched worktree, send live provider
 messages, or carry repair approval forward. Optional per-repo diagnosis hints are guidance only and fail closed for
 unsafe commands, private paths, token/env reads, network writes, mutation, or runtime/bootstrap context evidence.
+
+## Phase H repair-plan handoff
+
+Use `phase-h-repair-plan-handoff.md` after Phase G when the next step is a repair-plan packet for an operator or
+follow-up worker. Phase H summarizes target refs, current state, affected paths, proposed lane, focused verification,
+risks, blockers, and the later approval required before mutation. It starts with `Start`, closes with exactly one of
+`PR: <url>`, `Done`, or `Block`, and fails closed before PR/evidence publication if the branch diff or artifact bundle
+would include OpenClaw runtime/bootstrap context paths.
 
 ## Field doctor
 

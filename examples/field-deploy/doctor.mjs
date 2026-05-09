@@ -24,6 +24,7 @@ const packageFiles = {
   phaseDOperatorDecisionPacket: resolve(here, 'phase-d-operator-decision-packet.md'),
   phaseFControlsPolicy: resolve(here, 'phase-f-fleet-safe-controls-limited-autonomy.md'),
   phaseGDiagnoseOnly: resolve(here, 'phase-g-diagnose-only-conflict-context.md'),
+  phaseHRepairPlanHandoff: resolve(here, 'phase-h-repair-plan-handoff.md'),
 };
 
 function usage(exitCode = 1) {
@@ -206,6 +207,18 @@ function packageDoctor() {
     check(/AGENTS\.md/.test(phaseGDiagnoseOnly) && /\.openclaw\/\*\*/.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must include the runtime/bootstrap contamination guard');
     check(/`Start`/.test(phaseGDiagnoseOnly) && /`PR: <url>`/.test(phaseGDiagnoseOnly) && /`Done`/.test(phaseGDiagnoseOnly) && /`Block`/.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must preserve Start and terminal ledger markers');
     checks.push({ name: 'phase-g-diagnose-only-conflict-context', ok: true, path: relativeToRepo(packageFiles.phaseGDiagnoseOnly) });
+  }
+
+  const phaseHRepairPlanHandoff = readText(packageFiles.phaseHRepairPlanHandoff, errors);
+  if (phaseHRepairPlanHandoff) {
+    check(/repair-plan handoff/i.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must name repair-plan handoff operations');
+    check(/Phase G diagnose-only bundle/i.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must consume Phase G diagnose-only evidence');
+    check(/wait\/recheck/i.test(phaseHRepairPlanHandoff) && /autoSafe rehearsal/i.test(phaseHRepairPlanHandoff) && /humanOnly handoff/i.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must enumerate safe next lanes');
+    check(/must not run live `repair`|must not run `repair`/i.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must block live repair during handoff');
+    check(/`Start`/.test(phaseHRepairPlanHandoff) && /`PR: <url>`/.test(phaseHRepairPlanHandoff) && /`Done`/.test(phaseHRepairPlanHandoff) && /`Block`/.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must preserve Start and terminal ledger markers');
+    check(/startCommentUrl/.test(phaseHRepairPlanHandoff) && /prUrl/.test(phaseHRepairPlanHandoff) && /doneCommentUrl/.test(phaseHRepairPlanHandoff) && /blockCommentUrl/.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must require returned marker URLs');
+    check(/AGENTS\.md/.test(phaseHRepairPlanHandoff) && /\.openclaw\/\*\*/.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must include the runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-h-repair-plan-handoff', ok: true, path: relativeToRepo(packageFiles.phaseHRepairPlanHandoff) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);
