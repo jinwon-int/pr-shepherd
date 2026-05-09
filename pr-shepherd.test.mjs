@@ -12,6 +12,7 @@ import {
   buildLiveRepairExecutionHarness,
   buildPostActionAuditEntry,
   buildRepairRehearsalApprovalPackage,
+  buildRepairPlanHandoffFromDiagnosisBundle,
   buildSituationReportLine,
   buildStatusRows,
   classifyChecks,
@@ -1663,6 +1664,80 @@ test('Phase G conflict diagnosis bundle is sanitized and diagnose-only', () => {
   assert.equal(bundle.diagnosisHints[0].commands.length, 1);
   assert.equal(json.includes('TOKEN_EXAMPLE_REDACT_ME'), false);
   assert.equal(json.includes('/private/'), false);
+});
+
+test('Phase H repair-plan handoff is source-backed and non-mutating', () => {
+  const target = {
+    ...conflictPolicyTarget,
+    worktreePath: '/private/worktree',
+    statePath: '/private/state.json',
+    focusedChecks: ['pnpm test extensions/telegram/src/outbound-adapter.test.ts'],
+    diagnosisHints: [{
+      path: 'extensions/telegram/src/**',
+      summary: 'Review Telegram outbound receipt mapping.',
+      commands: ['pnpm test extensions/telegram/src/outbound-adapter.test.ts'],
+    }],
+  };
+  const bundle = buildConflictDiagnosisBundle(
+    target,
+    { ...base, headRefName: 'feature', baseRefName: 'main', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', url: target.url },
+    { kind: 'dirty', checks: { failed: [], pending: [] } },
+    {},
+    {
+      now: new Date('2026-05-09T00:00:00Z'),
+      conflicts: ['extensions/telegram/src/outbound-adapter.ts'],
+      changedFiles: [{ filename: 'extensions/telegram/src/outbound-adapter.ts', status: 'modified', additions: 5, deletions: 2, changes: 7 }],
+      baseOid: 'base-a',
+    },
+  );
+  const handoff = buildRepairPlanHandoffFromDiagnosisBundle(bundle, {
+    now: new Date('2026-05-09T00:01:00Z'),
+    currentRefs: { headRefOid: 'abc123', baseRefOid: 'base-a' },
+  });
+  const json = JSON.stringify(handoff);
+  assert.equal(bundle.repairPlanHandoff.schema, 'pr-shepherd-repair-plan-handoff/v1');
+  assert.equal(handoff.schema, 'pr-shepherd-repair-plan-handoff/v1');
+  assert.equal(handoff.sourceBacked, true);
+  assert.equal(handoff.productionMutation, false);
+  assert.equal(handoff.pushAllowed, false);
+  assert.equal(handoff.mutatesBranch, false);
+  assert.equal(handoff.staleDiagnosis.stale, false);
+  assert.equal(handoff.decision.kind, 'code-assisted-review');
+  assert.equal(handoff.decision.actionClass, AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT);
+  assert.equal(handoff.evidence.changedFiles[0].path, 'extensions/telegram/src/outbound-adapter.ts');
+  assert.equal(handoff.reviewArtifacts[0].paths[0], 'extensions/telegram/src/outbound-adapter.ts');
+  assert.equal(json.includes('TOKEN_EXAMPLE_REDACT_ME'), false);
+  assert.equal(json.includes('/private/'), false);
+});
+
+test('Phase H repair-plan handoff detects stale refs and runtime-context evidence', () => {
+  const bundle = buildConflictDiagnosisBundle(
+    conflictPolicyTarget,
+    { ...base, headRefName: 'feature', baseRefName: 'main', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' },
+    { kind: 'dirty', checks: { failed: [], pending: [] } },
+    {},
+    {
+      now: new Date('2026-05-09T00:00:00Z'),
+      conflicts: ['CHANGELOG.md'],
+      baseOid: 'base-a',
+    },
+  );
+  const stale = buildRepairPlanHandoffFromDiagnosisBundle(bundle, {
+    now: new Date('2026-05-09T00:01:00Z'),
+    currentRefs: { headRefOid: 'new-head', baseRefOid: 'base-a' },
+  });
+  assert.equal(stale.staleDiagnosis.stale, true);
+  assert.equal(stale.terminalLedgerMarker, 'Block');
+  assert.match(stale.decision.reasons.join('\n'), /headRefOid differs/);
+
+  const contaminated = buildRepairPlanHandoffFromDiagnosisBundle({
+    ...bundle,
+    conflictPaths: ['AGENTS.md'],
+    evidenceHygiene: { offendingRuntimeContextPaths: ['.openclaw/workspace-state.json'] },
+  }, { now: new Date('2026-05-09T00:01:00Z') });
+  assert.equal(contaminated.terminalLedgerMarker, 'Block');
+  assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['.openclaw/workspace-state.json', 'AGENTS.md']);
+  assert.match(contaminated.decision.reasons.join('\n'), /AGENTS\.md/);
 });
 
 test('diagnosis hint validation allows read-only commands and blocks mutation/secrets', () => {

@@ -40,6 +40,7 @@ export const FLEET_TARGET_STATE_TIERS = Object.freeze([
 ]);
 
 export const DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_REPAIR_PLAN_HANDOFF_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_ACTION_LEDGER_LIMIT = 50;
 export const DEFAULT_OBSERVATION_LEDGER_LIMIT = 288; // 48h at a 10-minute standing-ops cadence.
 export const DEFAULT_STRICT_VERIFY_REQUIRED = true;
@@ -72,7 +73,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
   process.exit(exitCode);
 }
 
@@ -83,13 +84,15 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair', 'rehearse'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'repair', 'rehearse'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
     allowCodeAssistedPush: false,
     keepFailedRebaseWorktree: true,
     artifactDir: null,
+    diagnoseBundle: null,
+    output: null,
     targetSelectors: [],
     allTargets: false,
   };
@@ -105,10 +108,14 @@ function parseArgs(argv) {
     else if (a === '--keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = true;
     else if (a === '--no-keep-failed-rebase-worktree') args.keepFailedRebaseWorktree = false;
     else if (a === '--artifact-dir') args.artifactDir = requireValue(a, rest[++i]);
+    else if (a === '--diagnose-bundle') args.diagnoseBundle = requireValue(a, rest[++i]);
+    else if (a === '--output') args.output = requireValue(a, rest[++i]);
     else if (a === '--help' || a === '-h') usage(0);
     else throw new Error(`Unknown argument: ${a}`);
   }
-  if (!args.config) usage();
+  if (args.cmd === 'repair-plan') {
+    if (!args.diagnoseBundle) usage();
+  } else if (!args.config) usage();
   if (args.cmd === 'rehearse') {
     args.dryRun = true;
     if (args.allowCodeAssistedPush) throw new Error('rehearse is dry-run only; --allow-code-assisted-push is not allowed');
@@ -2107,6 +2114,206 @@ function checkSummaryFromClassification(classification = {}) {
   };
 }
 
+function expectedRefsFromDiagnosisBundle(bundle = {}) {
+  return isPlainObject(bundle.expectedRefs) ? bundle.expectedRefs : {};
+}
+
+function currentRefsForHandoff(fields = {}) {
+  const currentPr = isPlainObject(fields.currentPr) ? fields.currentPr : {};
+  const currentRefs = isPlainObject(fields.currentRefs) ? fields.currentRefs : {};
+  return {
+    headRefOid: currentRefs.headRefOid || currentPr.headRefOid || null,
+    baseRefOid: currentRefs.baseRefOid || currentPr.baseRefOid || null,
+    conflictKey: currentRefs.conflictKey || null,
+  };
+}
+
+function diagnosisStaleness(bundle = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const maxAgeMs = fields.maxAgeMs === undefined ? DEFAULT_REPAIR_PLAN_HANDOFF_MAX_AGE_MS : Number(fields.maxAgeMs);
+  const createdAtMs = Date.parse(bundle.createdAt || '');
+  const expectedRefs = expectedRefsFromDiagnosisBundle(bundle);
+  const currentRefs = currentRefsForHandoff(fields);
+  const reasons = [];
+  if (!Number.isFinite(createdAtMs)) reasons.push('diagnosis bundle createdAt is missing or invalid');
+  else if (Number.isFinite(maxAgeMs) && maxAgeMs >= 0 && now.getTime() - createdAtMs > maxAgeMs) {
+    reasons.push(`diagnosis bundle is older than ${maxAgeMs}ms`);
+  }
+  if (currentRefs.headRefOid && expectedRefs.headRefOid && currentRefs.headRefOid !== expectedRefs.headRefOid) reasons.push('current headRefOid differs from diagnosis bundle');
+  if (currentRefs.baseRefOid && expectedRefs.baseRefOid && currentRefs.baseRefOid !== expectedRefs.baseRefOid) reasons.push('current baseRefOid differs from diagnosis bundle');
+  if (currentRefs.conflictKey && expectedRefs.conflictKey && currentRefs.conflictKey !== expectedRefs.conflictKey) reasons.push('current conflictKey differs from diagnosis bundle');
+  return {
+    stale: reasons.length > 0,
+    reasons,
+    evaluatedAt: now.toISOString(),
+    maxAgeMs: Number.isFinite(maxAgeMs) ? maxAgeMs : null,
+  };
+}
+
+function repairPlanHandoffDecision(bundle = {}, staleDiagnosis = {}, offendingPaths = []) {
+  const classification = bundle.prState?.classification || 'unknown';
+  const tier = bundle.conflictPolicy?.tier || 'none';
+  const conflicts = Array.isArray(bundle.conflictPaths) ? bundle.conflictPaths : [];
+  if (offendingPaths.length > 0) {
+    return {
+      kind: 'block',
+      actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
+      requiresOperatorApproval: false,
+      summary: 'blocked because runtime/bootstrap context paths appear in diagnosis evidence',
+      reasons: [`OpenClaw runtime/bootstrap context paths would enter repair-plan evidence: ${offendingPaths.join(', ')}`],
+      nextStep: 'Remove forbidden runtime/bootstrap context evidence, then regenerate the diagnose bundle before repair planning.',
+    };
+  }
+  if (staleDiagnosis.stale) {
+    return {
+      kind: 'refresh-diagnosis',
+      actionClass: AUTOMATIC_ACTION_CLASSES.RECHECK,
+      requiresOperatorApproval: false,
+      summary: 'diagnosis is stale; refresh PR state before choosing a repair path',
+      reasons: staleDiagnosis.reasons.slice(),
+      nextStep: 'Run check/diagnose again against the current PR head/base before any rehearsal or review handoff.',
+    };
+  }
+  if (['clean', 'merged', 'disabled'].includes(classification)) {
+    return {
+      kind: 'no-op',
+      actionClass: AUTOMATIC_ACTION_CLASSES.RECHECK,
+      requiresOperatorApproval: false,
+      summary: `PR classification is ${classification}; no repair handoff is needed`,
+      reasons: [`diagnose bundle classification is ${classification}`],
+      nextStep: 'Record status only; do not rehearse or mutate the branch.',
+    };
+  }
+  if (classification === 'unknown' || classification === 'failed') {
+    return {
+      kind: 'operator-review',
+      actionClass: AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE,
+      requiresOperatorApproval: true,
+      summary: `PR classification is ${classification}; repair is not safely actionable`,
+      reasons: [`diagnose bundle classification is ${classification}`],
+      nextStep: 'Recheck GitHub mergeability/checks and review failures before any rehearsal.',
+    };
+  }
+  if (tier === 'autoSafe' && conflicts.length > 0) {
+    return {
+      kind: 'auto-safe-rehearsal',
+      actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL,
+      requiresOperatorApproval: true,
+      summary: 'all recorded conflicts are autoSafe candidates; hand off to rehearsal before approval',
+      reasons: ['diagnose bundle conflict policy is autoSafe'],
+      nextStep: 'Run the dry-run rehearse lane, inspect the Phase D approval package, then require one-shot approval before live repair.',
+    };
+  }
+  if (tier === 'codeAssisted') {
+    return {
+      kind: 'code-assisted-review',
+      actionClass: AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT,
+      requiresOperatorApproval: true,
+      summary: 'code-assisted conflicts require manual review artifacts; no push is allowed from this handoff',
+      reasons: ['diagnose bundle conflict policy is codeAssisted'],
+      nextStep: 'Review changed files, conflict paths, diagnosis hints, and focused checks; create an explicit follow-up approval before any mutation.',
+    };
+  }
+  if (tier === 'humanOnly' || conflicts.length > 0) {
+    return {
+      kind: 'human-review-handoff',
+      actionClass: AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY,
+      requiresOperatorApproval: true,
+      summary: 'human-only or unlisted conflicts require maintainer handoff',
+      reasons: [`diagnose bundle conflict policy is ${tier}`],
+      nextStep: 'Escalate the sanitized bundle to a maintainer; keep automatic repair disabled.',
+    };
+  }
+  return {
+    kind: 'wait-or-rediagnose',
+    actionClass: AUTOMATIC_ACTION_CLASSES.RECHECK,
+    requiresOperatorApproval: false,
+    summary: 'no concrete conflict paths were recorded; wait/recheck or regenerate diagnosis evidence',
+    reasons: ['diagnose bundle has no conflict paths'],
+    nextStep: 'Run status/check and regenerate diagnosis after GitHub reports concrete dirty/conflict evidence.',
+  };
+}
+
+function repairPlanCommandHints(bundle = {}) {
+  const target = bundle.target || '<target-id>';
+  return {
+    refreshDiagnosis: ['node', 'pr-shepherd.mjs', 'diagnose', '--config', '<config>', '--target', target, '--artifact-dir', '<artifact-dir>'],
+    rehearsal: ['node', 'pr-shepherd.mjs', 'rehearse', '--config', '<config>', '--target', target, '--artifact-dir', '<artifact-dir>'],
+    statusFollowUp: ['node', 'pr-shepherd.mjs', 'status', '--config', '<config>', '--target', target],
+  };
+}
+
+export function buildRepairPlanHandoffFromDiagnosisBundle(bundle = {}, fields = {}) {
+  if (!isPlainObject(bundle) || bundle.schema !== 'pr-shepherd-conflict-diagnosis-bundle/v1') {
+    throw new Error('repair-plan handoff requires a pr-shepherd-conflict-diagnosis-bundle/v1 bundle');
+  }
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const evidencePaths = [
+    ...(Array.isArray(bundle.conflictPaths) ? bundle.conflictPaths : []),
+    ...(Array.isArray(bundle.changedFiles) ? bundle.changedFiles.map((file) => file.path) : []),
+    ...(Array.isArray(bundle.evidenceHygiene?.offendingRuntimeContextPaths) ? bundle.evidenceHygiene.offendingRuntimeContextPaths : []),
+  ];
+  const offendingPaths = findOpenClawRuntimeContextPaths(evidencePaths);
+  const stale = diagnosisStaleness(bundle, fields);
+  const decision = repairPlanHandoffDecision(bundle, stale, offendingPaths);
+  const expectedRefs = expectedRefsFromDiagnosisBundle(bundle);
+  const handoff = {
+    schema: 'pr-shepherd-repair-plan-handoff/v1',
+    createdAt: now.toISOString(),
+    source: {
+      schema: bundle.schema,
+      createdAt: bundle.createdAt || null,
+      target: bundle.target || null,
+      pr: bundle.pr || null,
+      url: bundle.url || null,
+      expectedRefs,
+      evidenceSource: 'diagnose-bundle',
+    },
+    productionMutation: false,
+    handoffOnly: true,
+    pushAllowed: false,
+    mutatesBranch: false,
+    sourceBacked: true,
+    staleDiagnosis: stale,
+    decision,
+    expectedRefs: {
+      ...expectedRefs,
+      repairKey: repairPlanKey({
+        headRefOid: expectedRefs.headRefOid,
+        baseRefName: expectedRefs.baseBranch,
+        mergeable: bundle.prState?.mergeable,
+        mergeStateStatus: bundle.prState?.mergeStateStatus,
+      }, expectedRefs.baseRefOid),
+    },
+    evidence: {
+      prState: bundle.prState || null,
+      conflictPolicy: bundle.conflictPolicy || null,
+      conflictPaths: Array.isArray(bundle.conflictPaths) ? bundle.conflictPaths.slice() : [],
+      changedFiles: Array.isArray(bundle.changedFiles) ? bundle.changedFiles.slice() : [],
+      diagnosisHints: Array.isArray(bundle.diagnosisHints) ? bundle.diagnosisHints.slice() : [],
+      focusedCommandHints: Array.isArray(bundle.focusedCommandHints) ? bundle.focusedCommandHints.slice() : [],
+    },
+    reviewArtifacts: [{
+      kind: decision.kind,
+      paths: Array.isArray(bundle.conflictPaths) ? bundle.conflictPaths.slice() : [],
+      changedFiles: Array.isArray(bundle.changedFiles) ? bundle.changedFiles.map((file) => file.path).filter(Boolean) : [],
+      diagnosisHints: Array.isArray(bundle.diagnosisHints) ? bundle.diagnosisHints.slice() : [],
+      focusedCommandHints: Array.isArray(bundle.focusedCommandHints) ? bundle.focusedCommandHints.slice() : [],
+      note: decision.nextStep,
+    }],
+    commandHints: repairPlanCommandHints(bundle),
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+      offendingRuntimeContextPaths: offendingPaths,
+    },
+    terminalLedgerMarker: ['block', 'refresh-diagnosis'].includes(decision.kind) ? 'Block' : 'Done',
+  };
+  return redactLedgerValue(handoff, fields.target || {});
+}
+
 export function buildConflictDiagnosisBundle(target = {}, pr = {}, classification = {}, state = {}, fields = {}) {
   const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
   const conflicts = [...new Set((fields.conflicts || state.lastConflictPaths || []).map(normalizedRepoPath).filter(Boolean))].sort();
@@ -2185,6 +2392,7 @@ export function buildConflictDiagnosisBundle(target = {}, pr = {}, classificatio
       Array.isArray(target.diagnosisHints) && target.diagnosisHints.length > 0 ? 'target-diagnosis-hints' : null,
     ].filter(Boolean),
   };
+  bundle.repairPlanHandoff = buildRepairPlanHandoffFromDiagnosisBundle(bundle, { now, target });
   return redactLedgerValue(bundle, target);
 }
 
@@ -2200,6 +2408,18 @@ function writeConflictDiagnosisBundle(target, bundle, artifactDirOverride) {
   const artifactPath = `${artifactDir}/${safeId}-conflict-diagnosis.json`;
   saveJson(artifactPath, bundle);
   return artifactPath;
+}
+
+function handleRepairPlan(args = {}) {
+  const bundle = loadJson(resolve(args.diagnoseBundle), null);
+  const handoff = buildRepairPlanHandoffFromDiagnosisBundle(bundle);
+  if (args.output) {
+    assertNoOpenClawRuntimeContextPaths([normalizedRepoPath(args.output)], 'repair-plan handoff artifact');
+    saveJson(resolve(args.output), handoff);
+  }
+  console.log(JSON.stringify(handoff, null, 2));
+  if (handoff.terminalLedgerMarker === 'Block') process.exitCode = 1;
+  return handoff;
 }
 
 export function conflictSetKey(pr, baseOid, conflicts = []) {
@@ -2703,6 +2923,7 @@ export function main(argv = process.argv.slice(2)) {
     if (!report.ok) process.exitCode = 1;
     return report;
   }
+  if (args.cmd === 'repair-plan') return handleRepairPlan(args);
 
   const cfg = loadConfig(args.config);
   if (!args.allTargets && args.targetSelectors.length === 0 && cfg.targets.length > 1) {

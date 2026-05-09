@@ -238,6 +238,22 @@ disposable sandbox/rehearsal worktree, but it must not push, edit the watched wo
 read secrets, or carry approval forward into live repair. Re-run the contamination guard before posting PRs or
 attaching artifacts.
 
+### Phase H repair-plan handoff
+
+Phase H derives a non-mutating `pr-shepherd-repair-plan-handoff/v1` package from a Phase G diagnosis bundle. The
+handoff is source-backed by the bundle target/PR/head/base/check evidence, carries conflict classification,
+changed-file summaries, diagnosis hints, focused check suggestions, stale-diagnosis detection, and review artifact
+pointers for `codeAssisted`/`humanOnly` paths. It never authorizes a push: autoSafe paths hand off to rehearsal,
+code-assisted paths hand off to explicit review, human-only paths hand off to maintainers, and stale or runtime-context
+contaminated evidence blocks closed with exact offending repo-relative paths.
+
+`diagnose` embeds the repair-plan handoff in its JSON output. To derive one from an existing bundle without contacting
+GitHub or mutating a branch, run:
+
+```sh
+node pr-shepherd.mjs repair-plan --diagnose-bundle path/to/target-conflict-diagnosis.json --output path/to/repair-plan-handoff.json
+```
+
 Targets may provide diagnosis-only hints for repo-owned paths:
 
 ```json
