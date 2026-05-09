@@ -284,6 +284,27 @@ read-only allowlist (`npm/pnpm/yarn test|run`, `node --check|--test`, and safe `
 --stat`/`git log --oneline`). It fails closed for shell metacharacters, mutation commands, network/write tools,
 token/env reads, private absolute paths, broad globs, or OpenClaw runtime/bootstrap context evidence.
 
+### Phase I review-state feedback
+
+Phase I turns GitHub review state into an operator-safe feedback packet after a reviewable PR, Phase H handoff, or
+operator issue receives reviewer feedback. Use
+[`phase-i-review-state-feedback.md`](examples/field-deploy/phase-i-review-state-feedback.md) to read `reviewDecision`,
+latest reviews, comments, check state, mergeability, current head/base refs, and requested changes without mutating a
+branch or treating a GitHub approval as live repair approval.
+
+The feedback packet classifies the state as approved-no-op, changes-requested, comments-only, stale-review,
+wait/recheck, or block, then names one safe next lane: continue observation, follow-up PR, rerun Phase G/H, Phase C
+rehearsal candidate, human maintainer review, or block. `APPROVED` can close a docs/config review or support a review
+PR marker, but it never bypasses failed/pending checks and never carries into Phase D/E. `CHANGES_REQUESTED`, stale
+reviews, unavailable review state, contradictory CI, or unsafe requested actions keep mutation disabled until a human
+records a separate safe plan.
+
+Phase I keeps the same ledger and evidence boundaries as the earlier phases: post `Start` before collecting feedback,
+close with exactly one of `PR: <url>`, `Done`, or `Block`, and report `startCommentUrl` plus the matching terminal URL
+when available. Before posting a PR marker or attaching the feedback packet, fail closed if the branch diff or planned
+artifact evidence would include `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
+`.openclaw/**`; report only repo-relative offending paths, not file contents.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
@@ -685,9 +706,10 @@ For Telegram/OpenClaw situation-report packaging, see `examples/field-deploy/`. 
 no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*` environment values,
 a config `notify` fragment for full reports on every 10-minute check, Phase A standing-operations
 runbook with state/evidence rotation and 24-48h observation templates, Phase B observation/noise-control,
-Phase C rehearsal, Phase D operator decision, Phase E execution/audit, and Phase F fleet-safe limited
-autonomy runbooks, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install
-sketch. Keep the copied env file and Telegram routing/token files outside this repo.
+Phase C rehearsal, Phase D operator decision, Phase E execution/audit, Phase F fleet-safe limited autonomy,
+Phase G diagnose-only context, Phase H repair-plan handoff, and Phase I review-state feedback runbooks, a final
+live-readiness GO/NO-GO package, and a reversible user-systemd canary install sketch. Keep the copied env file and
+Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
 

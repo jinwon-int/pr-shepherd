@@ -25,6 +25,7 @@ const packageFiles = {
   phaseFControlsPolicy: resolve(here, 'phase-f-fleet-safe-controls-limited-autonomy.md'),
   phaseGDiagnoseOnly: resolve(here, 'phase-g-diagnose-only-conflict-context.md'),
   phaseHRepairPlanHandoff: resolve(here, 'phase-h-repair-plan-handoff.md'),
+  phaseIReviewStateFeedback: resolve(here, 'phase-i-review-state-feedback.md'),
 };
 
 function usage(exitCode = 1) {
@@ -219,6 +220,18 @@ function packageDoctor() {
     check(/startCommentUrl/.test(phaseHRepairPlanHandoff) && /prUrl/.test(phaseHRepairPlanHandoff) && /doneCommentUrl/.test(phaseHRepairPlanHandoff) && /blockCommentUrl/.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must require returned marker URLs');
     check(/AGENTS\.md/.test(phaseHRepairPlanHandoff) && /\.openclaw\/\*\*/.test(phaseHRepairPlanHandoff), errors, 'Phase H runbook must include the runtime/bootstrap contamination guard');
     checks.push({ name: 'phase-h-repair-plan-handoff', ok: true, path: relativeToRepo(packageFiles.phaseHRepairPlanHandoff) });
+  }
+
+  const phaseIReviewStateFeedback = readText(packageFiles.phaseIReviewStateFeedback, errors);
+  if (phaseIReviewStateFeedback) {
+    check(/review-state feedback/i.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must name review-state feedback operations');
+    check(/reviewDecision/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must document GitHub reviewDecision handling');
+    check(/APPROVED/.test(phaseIReviewStateFeedback) && /CHANGES_REQUESTED/.test(phaseIReviewStateFeedback) && /REVIEW_REQUIRED/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must enumerate review states');
+    check(/does not authorize live repair|never live repair approval|does not carry review approval into live repair/i.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must keep review approval separate from repair approval');
+    check(/`Start`/.test(phaseIReviewStateFeedback) && /`PR: <url>`/.test(phaseIReviewStateFeedback) && /`Done`/.test(phaseIReviewStateFeedback) && /`Block`/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must preserve Start and terminal ledger markers');
+    check(/startCommentUrl/.test(phaseIReviewStateFeedback) && /prUrl/.test(phaseIReviewStateFeedback) && /doneCommentUrl/.test(phaseIReviewStateFeedback) && /blockCommentUrl/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must require returned marker URLs');
+    check(/AGENTS\.md/.test(phaseIReviewStateFeedback) && /\.openclaw\/\*\*/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must include the runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-i-review-state-feedback', ok: true, path: relativeToRepo(packageFiles.phaseIReviewStateFeedback) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);
