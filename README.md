@@ -152,6 +152,16 @@ that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true
 selected targets is blocked before GitHub/worktree access unless config-level `automaticActions.multiTargetLiveRepair`
 is enabled with `scope="multi-target-auto-safe-repair"`, approval metadata, and `targetIds` naming every selected target.
 
+Phase M adds a separate bounded minor lane: `automaticActions.minorAutoRepair` may be enabled per target with
+`scope="minor-auto-safe-repair"`, `actionClass="auto-safe-repair"`, a head `branchAllowlist`, explicit
+`pathAllowlist`, and deterministic `resolverAllowlist`. The built-in lane is intentionally narrow: changelog,
+release-note, and documentation text paths can pass; source code, dependency/lockfiles, CI/workflow,
+security/auth/config, provider behavior, and OpenClaw runtime/bootstrap context paths stay approval-required.
+The lane still requires one selected target, dirty classification, passing focused checks, push budget, fresh refs,
+contamination checks, expected-head `--force-with-lease`, and a dry-run/rehearsal preview unless the target explicitly
+marks the repair as deterministic `zeroRehearsalSafe`. Immediately before push, Shepherd records a minor-auto gate
+preview and blocks if the exact changed paths or resolver identity no longer match the allowlist.
+
 ### Action-class executor operating procedure
 
 Treat the action-class executor as a narrow dispatch layer from a recorded plan to a single approved effect:
