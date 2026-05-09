@@ -47,6 +47,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   decision packet from an allowed Phase K candidate, without running live repair or editing approval config.
 - `phase-m-bounded-auto-safe-minor-repair.md` — Phase M runbook for one bounded, reviewable, auto-safe minor
   repository repair with strict scope, verification, closeout markers, and runtime/bootstrap contamination guards.
+- `phase-n-minor-auto-execution-controller.md` — Phase N runbook for operating the built-in
+  `minor-auto-safe-repair` execution controller with final changed-path, resolver, push, and evidence gates.
 
 ## Safe install sketch
 
@@ -272,6 +274,17 @@ approved scope. It starts with `Start`, closes with exactly one of `PR: <url>`, 
 creation if runtime/bootstrap context paths would enter the branch or artifact evidence. Phase M does not run live
 `repair`, force-push watched branches, create timers, send provider messages except ledger markers, or create future
 repair approval.
+
+## Phase N minor-auto execution controller operations
+
+Use `phase-n-minor-auto-execution-controller.md` when the built-in controller may run one preconfigured
+`automaticActions.minorAutoRepair` target. Phase N starts with `Start`, builds the automatic action plan before
+dispatch, allows only `lane="minor-auto-safe-repair"` with `auto-safe-repair`, re-runs focused verification,
+checks exact changed paths and resolver identities immediately before push, enforces the runtime/bootstrap
+contamination guard, verifies the expected remote head, and pushes only through `--force-with-lease`. It closes with
+`Done` or `Block` and returns `startCommentUrl` plus the matching terminal URL when available. Phase N does not permit
+multi-target mutation, failed/pending-check repair, allowlist widening during execution, broad live repair, or retries
+after drift without a fresh Start marker and fresh gates.
 
 ## Field doctor
 
