@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   AUTOMATIC_ACTION_CLASSES,
+  MINOR_AUTO_SAFE_REPAIR_SCOPE,
   REVIEW_DECISION_OUTCOMES,
   appendActionLedgerEntry,
   appendOperatorDecisionLedgerEntry,
+  buildMinorAutoRepairGate,
   appendSupervisedRehearsalQueueLedgerEntry,
   buildConflictArtifactPayload,
   buildConflictDiagnosisBundle,
@@ -328,6 +330,44 @@ test('validateConfigObject requires explicit live auto-repair gates when enabled
   assert.match(malformed.errors.join('\n'), /liveRepair\.approvedAt must be an ISO-8601 timestamp/);
   assert.match(malformed.errors.join('\n'), /liveRepair\.expiresAt must be an ISO-8601 timestamp/);
   assert.match(malformed.errors.join('\n'), /liveRepair\.approvedBy must be a non-empty string/);
+});
+
+test('validateConfigObject supports bounded minor-auto-safe repair policy and rejects risky paths', () => {
+  const good = validateConfigObject({
+    targets: [validationTarget({
+      automaticActions: {
+        minorAutoRepair: {
+          enabled: true,
+          scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+          actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+          branchAllowlist: ['feature'],
+          pathAllowlist: ['CHANGELOG.md', 'docs/**'],
+          resolverAllowlist: ['merge-changelog-top-entry'],
+        },
+      },
+    })],
+  });
+  assert.equal(good.ok, true);
+
+  const bad = validateConfigObject({
+    targets: [validationTarget({
+      automaticActions: {
+        minorAutoRepair: {
+          enabled: true,
+          scope: 'auto-safe-repair',
+          actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+          pathAllowlist: ['src/runtime.ts', 'pnpm-lock.yaml', 'AGENTS.md'],
+          resolverAllowlist: ['manual-merge'],
+        },
+      },
+    })],
+  });
+  assert.equal(bad.ok, false);
+  assert.match(bad.errors.join('\n'), /minorAutoRepair\.scope must be minor-auto-safe-repair/);
+  assert.match(bad.errors.join('\n'), /source, executable, config, generated metadata, or structured data paths require approval/);
+  assert.match(bad.errors.join('\n'), /dependency or lockfile paths require approval/);
+  assert.match(bad.errors.join('\n'), /AGENTS\.md/);
+  assert.match(bad.errors.join('\n'), /resolverAllowlist\[0\] is not supported/);
 });
 
 const multiTargetApproval = {
@@ -1590,6 +1630,51 @@ test('automatic action planner fails closed for unknown, failed, and ungated dir
   assert.equal(dirtyLive.allowed, false);
   assert.match(dirtyLive.reasons.join('\n'), /liveRepair\.enabled/);
   assert.throws(() => executeAutomaticActionPlan(dirtyLive), /automatic action blocked/);
+});
+
+test('minor-auto-safe repair lane permits only bounded low-risk changed paths without operator approval', () => {
+  const target = validationTarget({
+    headOwner: 'contributor',
+    baseOwner: 'owner',
+    automaticActions: {
+      minorAutoRepair: {
+        enabled: true,
+        scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        branchAllowlist: ['feature'],
+        pathAllowlist: ['CHANGELOG.md', 'docs/**'],
+        resolverAllowlist: ['merge-changelog-top-entry'],
+        zeroRehearsalSafe: true,
+      },
+    },
+  });
+  const pr = { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const plan = planAutomaticAction(target, {}, pr, classification, { dryRun: false, now: Date.parse('2026-05-09T08:00:00Z') });
+  assert.equal(plan.actionClass, AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR);
+  assert.equal(plan.lane, MINOR_AUTO_SAFE_REPAIR_SCOPE);
+  assert.equal(plan.requiresOperatorApproval, false);
+  assert.equal(plan.pushAllowed, true);
+  assert.equal(plan.minorAutoRepairGate.gates.find((gate) => gate.name === 'changed-paths-within-allowlist').deferred, true);
+
+  const okGate = buildMinorAutoRepairGate(target, {}, pr, classification, {
+    now: new Date('2026-05-09T08:01:00Z'),
+    changedPaths: ['CHANGELOG.md', 'docs/usage.md'],
+    conflictInfo: classifyConflictSet(['CHANGELOG.md'], target),
+  });
+  assert.equal(okGate.gateAllowed, true);
+  assert.equal(okGate.status, 'auto-repaired');
+  assert.equal(okGate.requiresOperatorApproval, false);
+
+  const riskyGate = buildMinorAutoRepairGate(target, {}, pr, classification, {
+    now: new Date('2026-05-09T08:01:00Z'),
+    changedPaths: ['src/runtime.ts', 'pnpm-lock.yaml', 'AGENTS.md'],
+  });
+  assert.equal(riskyGate.gateAllowed, false);
+  assert.equal(riskyGate.status, 'blocked-risk');
+  assert.match(riskyGate.blockedReasons.join('\n'), /outside automaticActions\.minorAutoRepair\.pathAllowlist/);
+  assert.match(riskyGate.blockedReasons.join('\n'), /require approval/);
+  assert.match(riskyGate.blockedReasons.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
 });
 
 test('automatic action explanations cover every action class without executing handlers', () => {

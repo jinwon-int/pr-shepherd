@@ -152,6 +152,16 @@ that boundary is explicitly acknowledged with `allowMaintainerOwnedBranches=true
 selected targets is blocked before GitHub/worktree access unless config-level `automaticActions.multiTargetLiveRepair`
 is enabled with `scope="multi-target-auto-safe-repair"`, approval metadata, and `targetIds` naming every selected target.
 
+Phase M adds a separate bounded minor lane: `automaticActions.minorAutoRepair` may be enabled per target with
+`scope="minor-auto-safe-repair"`, `actionClass="auto-safe-repair"`, a head `branchAllowlist`, explicit
+`pathAllowlist`, and deterministic `resolverAllowlist`. The built-in lane is intentionally narrow: changelog,
+release-note, and documentation text paths can pass; source code, dependency/lockfiles, CI/workflow,
+security/auth/config, provider behavior, and OpenClaw runtime/bootstrap context paths stay approval-required.
+The lane still requires one selected target, dirty classification, passing focused checks, push budget, fresh refs,
+contamination checks, expected-head `--force-with-lease`, and a dry-run/rehearsal preview unless the target explicitly
+marks the repair as deterministic `zeroRehearsalSafe`. Immediately before push, Shepherd records a minor-auto gate
+preview and blocks if the exact changed paths or resolver identity no longer match the allowlist.
+
 ### Action-class executor operating procedure
 
 Treat the action-class executor as a narrow dispatch layer from a recorded plan to a single approved effect:
@@ -368,6 +378,22 @@ attaching packet evidence, or letting a runner create a review PR, `--branch-dif
 inputs plus branch diff paths and planned artifact evidence are checked against the runtime/bootstrap denylist; fail
 closed on `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`, reporting
 only exact repo-relative offending paths.
+
+### Phase M bounded auto-safe minor repair operations
+
+Phase M is the narrow, supervised lane for one reviewable minor repair after prior evidence or an operator issue has
+reduced the work to a deterministic patch. Use
+[`phase-m-bounded-auto-safe-minor-repair.md`](examples/field-deploy/phase-m-bounded-auto-safe-minor-repair.md) only
+when the operator provides a bounded scope, approved path set, diff budget, source evidence, and verification plan. It
+is intended for documentation/runbook clarifications, example text, small test expectation fixes that match documented
+behavior, formatting, spelling, or link corrections.
+
+It is not standing automation: `autoSafeMinor=true`, `productionMutation=false`, `liveRepair=false`,
+`pushAllowed=false`, and `timers=false`. Phase M starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or
+`Block`, and reports `startCommentUrl` plus the matching terminal URL when available. Before editing, before attaching
+evidence, and again before PR creation, the final diff and planned evidence paths are checked against the
+runtime/bootstrap denylist; fail closed on `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
+`IDENTITY.md`, or `.openclaw/**`, reporting only exact repo-relative offending paths.
 
 ## Sandbox repair proof harness
 

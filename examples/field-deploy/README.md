@@ -45,6 +45,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   timers, or pushes.
 - `phase-l-phase-d-operator-packet-workflow.md` — Phase L runbook for preparing a sanitized Phase D operator
   decision packet from an allowed Phase K candidate, without running live repair or editing approval config.
+- `phase-m-bounded-auto-safe-minor-repair.md` — Phase M runbook for one bounded, reviewable, auto-safe minor
+  repository repair with strict scope, verification, closeout markers, and runtime/bootstrap contamination guards.
 
 ## Safe install sketch
 
@@ -258,6 +260,18 @@ with exactly one of `PR: <url>`, `Done`, or `Block`, returns `startCommentUrl` p
 available, and blocks before PR/evidence publication if runtime/bootstrap context paths would enter the branch or
 artifact evidence. Phase L does not run live `repair`, push, create timers, edit approval config, or treat Phase K
 candidacy as live repair approval.
+
+## Phase M bounded auto-safe minor repair operations
+
+Use `phase-m-bounded-auto-safe-minor-repair.md` only after an operator names one minor repository repair with a clear
+path allowlist, diff budget, source evidence, and verification plan. Phase M covers deterministic documentation,
+example, small test-expectation, formatting, spelling, or link fixes; it blocks production code rewrites, dependency
+updates, generated bundles, lockfiles, security-sensitive files, hidden files, binary files, and anything outside the
+approved scope. It starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or `Block`, returns
+`startCommentUrl` plus the matching terminal URL when available, and blocks before editing, evidence publication, or PR
+creation if runtime/bootstrap context paths would enter the branch or artifact evidence. Phase M does not run live
+`repair`, force-push watched branches, create timers, send provider messages except ledger markers, or create future
+repair approval.
 
 ## Field doctor
 
