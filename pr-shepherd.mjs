@@ -41,6 +41,7 @@ export const FLEET_TARGET_STATE_TIERS = Object.freeze([
 
 export const DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_REPAIR_PLAN_HANDOFF_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_SUPERVISED_REHEARSAL_QUEUE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_ACTION_LEDGER_LIMIT = 50;
 export const DEFAULT_OBSERVATION_LEDGER_LIMIT = 288; // 48h at a 10-minute standing-ops cadence.
 export const DEFAULT_STRICT_VERIFY_REQUIRED = true;
@@ -82,7 +83,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs decision-ledger --handoff path --decision outcome [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs repair-plan --diagnose-bundle path [--output path]\n  node pr-shepherd.mjs decision-ledger --handoff path --decision outcome [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearsal-queue --feedback path [--config config.json --target id|owner/repo#number | --pr-state path] [--state path] [--output path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
   process.exit(exitCode);
 }
 
@@ -93,7 +94,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'decision-ledger', 'repair', 'rehearse'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair-plan', 'decision-ledger', 'rehearsal-queue', 'repair', 'rehearse'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -102,6 +103,7 @@ function parseArgs(argv) {
     artifactDir: null,
     diagnoseBundle: null,
     handoff: null,
+    feedback: null,
     prState: null,
     statePath: null,
     output: null,
@@ -110,6 +112,8 @@ function parseArgs(argv) {
     summary: null,
     nextOwner: null,
     workstream: null,
+    queueName: null,
+    priority: null,
     focusedChecks: [],
     riskFlags: [],
     targetSelectors: [],
@@ -129,6 +133,7 @@ function parseArgs(argv) {
     else if (a === '--artifact-dir') args.artifactDir = requireValue(a, rest[++i]);
     else if (a === '--diagnose-bundle') args.diagnoseBundle = requireValue(a, rest[++i]);
     else if (a === '--handoff' || a === '--repair-plan-handoff') args.handoff = requireValue(a, rest[++i]);
+    else if (a === '--feedback' || a === '--review-feedback') args.feedback = requireValue(a, rest[++i]);
     else if (a === '--pr-state') args.prState = requireValue(a, rest[++i]);
     else if (a === '--state') args.statePath = requireValue(a, rest[++i]);
     else if (a === '--decision') args.decision = requireValue(a, rest[++i]);
@@ -136,6 +141,8 @@ function parseArgs(argv) {
     else if (a === '--summary') args.summary = requireValue(a, rest[++i]);
     else if (a === '--next-owner') args.nextOwner = requireValue(a, rest[++i]);
     else if (a === '--workstream') args.workstream = requireValue(a, rest[++i]);
+    else if (a === '--queue-name') args.queueName = requireValue(a, rest[++i]);
+    else if (a === '--priority') args.priority = requireValue(a, rest[++i]);
     else if (a === '--focused-check') args.focusedChecks.push(requireValue(a, rest[++i]));
     else if (a === '--risk') args.riskFlags.push(requireValue(a, rest[++i]));
     else if (a === '--output') args.output = requireValue(a, rest[++i]);
@@ -148,6 +155,9 @@ function parseArgs(argv) {
     if (!args.handoff || !args.decision) usage();
     if (args.allTargets) throw new Error('decision-ledger records one operator decision at a time; --all is not supported');
     if (!REVIEW_DECISION_OUTCOMES.includes(args.decision)) throw new Error(`--decision must be one of: ${REVIEW_DECISION_OUTCOMES.join(', ')}`);
+  } else if (args.cmd === 'rehearsal-queue') {
+    if (!args.feedback) usage();
+    if (args.allTargets) throw new Error('rehearsal-queue records one supervised dry-run packet at a time; --all is not supported');
   } else if (!args.config) usage();
   if (args.cmd === 'rehearse') {
     args.dryRun = true;
@@ -896,6 +906,198 @@ export function appendOperatorDecisionLedgerEntry(state, target = {}, feedback =
   state.lastOperatorDecisionFeedback = feedback;
   return true;
 }
+
+function feedbackAgeReasons(feedback = {}, now, maxAgeMs) {
+  const reasons = [];
+  const createdAtMs = Date.parse(feedback.createdAt || '');
+  const expiresAtMs = Date.parse(feedback.expiresAt || '');
+  if (!Number.isFinite(createdAtMs)) reasons.push('review-state feedback createdAt is missing or invalid');
+  else if (createdAtMs - now.getTime() > 5 * 60 * 1000) reasons.push('review-state feedback createdAt is in the future');
+  else if (Number.isFinite(maxAgeMs) && maxAgeMs >= 0 && now.getTime() - createdAtMs > maxAgeMs) reasons.push(`review-state feedback is older than ${maxAgeMs}ms`);
+  if (!Number.isFinite(expiresAtMs)) reasons.push('review-state feedback expiresAt is missing or invalid');
+  else if (now.getTime() > expiresAtMs) reasons.push('review-state feedback has expired');
+  return reasons;
+}
+
+function rehearsalQueueRefReasons(feedback = {}, currentPr = {}, state = {}) {
+  const expectedRefs = feedback.expectedRefs || {};
+  const currentRefs = currentRefState(currentPr, state);
+  const reasons = [];
+  if (expectedRefs.headRefOid) {
+    if (!currentRefs.headRefOid) reasons.push('current headRefOid unavailable; refresh PR state before queueing rehearsal');
+    else if (expectedRefs.headRefOid !== currentRefs.headRefOid) reasons.push(`headRefOid differs from feedback: expected ${expectedRefs.headRefOid}, current ${currentRefs.headRefOid}`);
+  }
+  if (expectedRefs.baseRefOid) {
+    if (!currentRefs.baseRefOid) reasons.push('current baseRefOid unavailable; refresh base evidence before queueing rehearsal');
+    else if (expectedRefs.baseRefOid !== currentRefs.baseRefOid) reasons.push(`baseRefOid differs from feedback: expected ${expectedRefs.baseRefOid}, current ${currentRefs.baseRefOid}`);
+  }
+  return reasons;
+}
+
+function rehearsalQueueId(packet = {}) {
+  const refs = packet.expectedRefs || {};
+  return [
+    'rehearsal-queue',
+    packet.target || 'target',
+    packet.sourceFeedback?.decisionId || packet.sourceFeedback?.createdAt || 'feedback',
+    refs.headRefOid || 'no-head',
+    refs.baseRefOid || 'no-base',
+  ].join(':');
+}
+
+export function buildSupervisedRehearsalQueuePacket(feedback = {}, currentPr = {}, state = {}, fields = {}) {
+  if (!isPlainObject(feedback) || feedback.schema !== 'pr-shepherd-review-state-feedback/v1') {
+    throw new Error('supervised rehearsal queue requires a pr-shepherd-review-state-feedback/v1 packet');
+  }
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const target = fields.target || {};
+  const classification = fields.classification || classifyPr(currentPr || {});
+  const maxAgeMs = fields.maxAgeMs === undefined ? DEFAULT_SUPERVISED_REHEARSAL_QUEUE_MAX_AGE_MS : Number(fields.maxAgeMs);
+  const branchDiffPaths = Array.isArray(fields.branchDiffPaths) ? fields.branchDiffPaths : [];
+  const artifactEvidencePaths = Array.isArray(fields.artifactEvidencePaths) ? fields.artifactEvidencePaths : [];
+  const feedbackEvidencePaths = [
+    ...(Array.isArray(feedback.evidenceHygiene?.offendingRuntimeContextPaths) ? feedback.evidenceHygiene.offendingRuntimeContextPaths : []),
+    ...(Array.isArray(feedback.evidenceHygiene?.plannedArtifactEvidencePaths) ? feedback.evidenceHygiene.plannedArtifactEvidencePaths : []),
+  ];
+  const contamination = findOpenClawRuntimeContextPaths([...branchDiffPaths, ...artifactEvidencePaths, ...feedbackEvidencePaths]);
+  const expectedRefs = {
+    headBranch: target.headBranch || feedback.expectedRefs?.headBranch || currentPr?.headRefName || null,
+    baseBranch: target.baseBranch || feedback.expectedRefs?.baseBranch || currentPr?.baseRefName || null,
+    headRefOid: currentPr?.headRefOid || state.lastSeenHeadOid || feedback.expectedRefs?.headRefOid || null,
+    baseRefOid: currentPr?.baseRefOid || state.lastSeenBaseOid || feedback.expectedRefs?.baseRefOid || null,
+  };
+  const repairKey = fields.repairKey || feedback.expectedRefs?.repairKey || repairPlanKey({
+    headRefOid: expectedRefs.headRefOid,
+    baseRefName: expectedRefs.baseBranch,
+    mergeable: currentPr?.mergeable || state.lastMergeable || feedback.reviewState?.mergeable,
+    mergeStateStatus: currentPr?.mergeStateStatus || state.lastMergeStateStatus || feedback.reviewState?.mergeStateStatus,
+  }, expectedRefs.baseRefOid);
+  expectedRefs.repairKey = repairKey;
+
+  const blockedReasons = [];
+  if (feedback.status !== 'recorded' || feedback.decisionAllowed !== true) blockedReasons.push('review-state feedback is not a recorded allowed decision');
+  if (feedback.outcome !== 'accepted-for-rehearsal') blockedReasons.push(`review-state feedback outcome ${feedback.outcome || '(missing)'} is not accepted-for-rehearsal`);
+  if (feedback.noLiveApproval === false) blockedReasons.push('review-state feedback must not grant or carry live repair approval');
+  if (feedback.terminalLedgerMarker === 'Block') blockedReasons.push('review-state feedback is blocked');
+  if (feedback.staleEvidence?.stale) blockedReasons.push('review-state feedback already marked evidence stale');
+  if (classification?.kind !== 'dirty') blockedReasons.push(`current classification ${classification?.kind || 'unknown'} is not dirty; rehearsal queue is dry-run only for dirty PRs`);
+  if (String(currentPr?.reviewDecision || feedback.reviewState?.reviewDecision || '').toUpperCase() === 'CHANGES_REQUESTED') {
+    blockedReasons.push('GitHub reviewDecision is CHANGES_REQUESTED; do not queue rehearsal until feedback is resolved or re-routed');
+  }
+  blockedReasons.push(...feedbackAgeReasons(feedback, now, maxAgeMs));
+  blockedReasons.push(...rehearsalQueueRefReasons(feedback, currentPr, state));
+  if (contamination.length > 0) blockedReasons.push(`OpenClaw runtime/bootstrap context paths would enter rehearsal queue evidence: ${contamination.join(', ')}`);
+
+  const dryRunCommand = renderedCommand('rehearse', target, fields);
+  const queueAllowed = blockedReasons.length === 0;
+  const dryRunPacket = {
+    schema: 'pr-shepherd-rehearsal-dry-run-packet/v1',
+    createdAt: now.toISOString(),
+    target: target.id || feedback.target || null,
+    pr: targetPrRef(target) || target.pr || feedback.pr || null,
+    url: target.url || feedback.url || currentPr?.url || null,
+    dryRunOnly: true,
+    productionMutation: false,
+    pushAllowed: false,
+    mutatesBranch: false,
+    noLiveApproval: true,
+    command: dryRunCommand,
+    alternateCommand: ['node', 'pr-shepherd.mjs', 'repair', '--config', '<config>', '--target', target.id || feedback.target || '<target-id>', '--dry-run'],
+    expectedRefs,
+    gates: [
+      { name: 'feedback-accepted-for-rehearsal', ok: feedback.status === 'recorded' && feedback.decisionAllowed === true && feedback.outcome === 'accepted-for-rehearsal' },
+      { name: 'dirty-pr-only', ok: classification?.kind === 'dirty', classification: classification?.kind || 'unknown' },
+      { name: 'fresh-feedback', ok: feedbackAgeReasons(feedback, now, maxAgeMs).length === 0, maxAgeMs },
+      { name: 'refs-match-feedback', ok: rehearsalQueueRefReasons(feedback, currentPr, state).length === 0 },
+      { name: 'contamination-guard', ok: contamination.length === 0, offendingPaths: contamination },
+    ],
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      plannedBranchDiffPaths: branchDiffPaths.slice().sort(),
+      plannedArtifactEvidencePaths: artifactEvidencePaths.slice().sort(),
+      offendingRuntimeContextPaths: contamination,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    operatorChecklist: [
+      'Confirm Start marker exists before running this queued dry-run.',
+      'Run only the listed rehearse/repair --dry-run command; do not run live repair from this packet.',
+      'Verify target id, PR, head/base refs, and repairKey still match immediately before execution.',
+      'Inspect the generated Phase D approval package; require a separate one-shot approval before any live repair.',
+      'Close the ledger with Done after a successful dry-run packet, or Block with exact offending paths/reasons.',
+    ],
+    terminalLedgerMarker: queueAllowed ? 'Done' : 'Block',
+  };
+  const packet = {
+    schema: 'pr-shepherd-supervised-rehearsal-queue/v1',
+    createdAt: now.toISOString(),
+    queueName: fields.queueName || 'supervised-rehearsal',
+    queueAllowed,
+    status: queueAllowed ? 'queued' : 'blocked',
+    blockedReasons,
+    target: target.id || feedback.target || null,
+    pr: targetPrRef(target) || target.pr || feedback.pr || null,
+    url: target.url || feedback.url || currentPr?.url || null,
+    productionMutation: false,
+    supervised: true,
+    requiresOperatorSupervision: true,
+    dryRunOnly: true,
+    pushAllowed: false,
+    mutatesBranch: false,
+    noLiveApproval: true,
+    sourceFeedback: {
+      schema: feedback.schema,
+      decisionId: feedback.decisionId || null,
+      createdAt: feedback.createdAt || null,
+      outcome: feedback.outcome || null,
+      terminalLedgerMarker: feedback.terminalLedgerMarker || null,
+    },
+    expectedRefs,
+    queueItem: {
+      id: null,
+      priority: fields.priority || 'normal',
+      actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL,
+      status: queueAllowed ? 'ready-for-supervised-dry-run' : 'blocked',
+      command: dryRunCommand,
+      dryRunPacketSchema: dryRunPacket.schema,
+      supervisionRequired: true,
+      liveRepairApprovalRequiredSeparately: true,
+    },
+    dryRunPacket,
+    evidenceHygiene: dryRunPacket.evidenceHygiene,
+    terminalLedgerMarker: queueAllowed ? 'Done' : 'Block',
+  };
+  packet.queueItem.id = fields.id || rehearsalQueueId(packet);
+  return redactLedgerValue(packet, target);
+}
+
+export function appendSupervisedRehearsalQueueLedgerEntry(state, target = {}, packet = {}, now = new Date()) {
+  const ledger = Array.isArray(state.supervisedRehearsalQueueLedger) ? state.supervisedRehearsalQueueLedger.slice() : [];
+  const entry = redactLedgerValue({
+    schema: 'pr-shepherd-supervised-rehearsal-queue-ledger/v1',
+    at: now instanceof Date ? now.toISOString() : new Date(now).toISOString(),
+    id: packet.queueItem?.id || rehearsalQueueId(packet),
+    target: target.id || packet.target || null,
+    pr: targetPrRef(target) || target.pr || packet.pr || null,
+    status: packet.status || null,
+    queueAllowed: packet.queueAllowed === true,
+    actionClass: packet.queueItem?.actionClass || AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL,
+    dryRunOnly: packet.dryRunOnly !== false,
+    noLiveApproval: packet.noLiveApproval !== false,
+    blockedReasons: packet.blockedReasons || [],
+    expectedRefs: packet.expectedRefs || {},
+    terminalLedgerMarker: packet.terminalLedgerMarker || null,
+  }, target);
+  if (ledger.some((item) => item?.id === entry.id)) {
+    state.supervisedRehearsalQueueLedger = ledger;
+    return false;
+  }
+  state.supervisedRehearsalQueueLedger = [...ledger, entry].slice(-DEFAULT_ACTION_LEDGER_LIMIT);
+  state.lastSupervisedRehearsalQueuePacket = packet;
+  return true;
+}
+
 
 export function summarizeOperatorDecisionLedger(ledger = [], limit = 3) {
   const entries = Array.isArray(ledger) ? ledger : [];
@@ -2729,6 +2931,20 @@ function targetFromHandoff(handoff = {}, target = {}) {
   };
 }
 
+function targetFromFeedback(feedback = {}, target = {}) {
+  return {
+    id: target.id || feedback.target || null,
+    pr: target.pr || feedback.pr || null,
+    url: target.url || feedback.url || null,
+    owner: target.owner || null,
+    repo: target.repo || null,
+    number: target.number || null,
+    headBranch: target.headBranch || feedback.expectedRefs?.headBranch || null,
+    baseBranch: target.baseBranch || feedback.expectedRefs?.baseBranch || null,
+    privatePaths: target.privatePaths || [],
+  };
+}
+
 function handleDecisionLedger(args = {}) {
   const handoff = loadJson(resolve(args.handoff), null);
   let target = targetFromHandoff(handoff);
@@ -2771,6 +2987,45 @@ function handleDecisionLedger(args = {}) {
   console.log(JSON.stringify({ ok: feedback.status !== 'blocked', feedback, operatorDecisionLedger: summarizeOperatorDecisionLedger(state.operatorDecisionLedger || []) }, null, 2));
   if (feedback.terminalLedgerMarker === 'Block') process.exitCode = 1;
   return feedback;
+}
+
+function handleRehearsalQueue(args = {}) {
+  const feedback = loadJson(resolve(args.feedback), null);
+  let target = targetFromFeedback(feedback);
+  let statePath = args.statePath || null;
+  let state = statePath ? loadJson(resolve(statePath), {}) : {};
+  let currentPr = args.prState ? loadJson(resolve(args.prState), {}) : null;
+  let classification = null;
+  if (args.config) {
+    const cfg = loadConfig(args.config);
+    const selected = selectTargets(cfg, args.targetSelectors, false);
+    if (selected.length !== 1) throw new Error('rehearsal-queue requires exactly one selected target when --config is used');
+    target = targetFromFeedback(feedback, selected[0]);
+    statePath = statePath || selected[0].statePath || null;
+    state = statePath ? { ...loadJson(resolve(statePath), {}) } : {};
+    if (!currentPr) {
+      const refreshed = ghPrViewWithUnknownRecheck(selected[0]);
+      currentPr = refreshed.pr;
+      classification = refreshed.classification;
+    }
+  }
+  if (!currentPr) currentPr = {};
+  classification = classification || classifyPr(currentPr);
+  const packet = buildSupervisedRehearsalQueuePacket(feedback, currentPr, state, {
+    target,
+    classification,
+    queueName: args.queueName,
+    priority: args.priority,
+  });
+  appendSupervisedRehearsalQueueLedgerEntry(state, target, packet, new Date(packet.createdAt));
+  if (statePath) saveJson(resolve(statePath), state);
+  if (args.output) {
+    assertNoOpenClawRuntimeContextPaths([normalizedRepoPath(args.output)], 'rehearsal queue artifact');
+    saveJson(resolve(args.output), packet);
+  }
+  console.log(JSON.stringify({ ok: packet.queueAllowed, packet }, null, 2));
+  if (packet.terminalLedgerMarker === 'Block') process.exitCode = 1;
+  return packet;
 }
 
 export function conflictSetKey(pr, baseOid, conflicts = []) {
@@ -3276,6 +3531,7 @@ export function main(argv = process.argv.slice(2)) {
   }
   if (args.cmd === 'repair-plan') return handleRepairPlan(args);
   if (args.cmd === 'decision-ledger') return handleDecisionLedger(args);
+  if (args.cmd === 'rehearsal-queue') return handleRehearsalQueue(args);
 
   const cfg = loadConfig(args.config);
   if (!args.allTargets && args.targetSelectors.length === 0 && cfg.targets.length > 1) {

@@ -14,6 +14,7 @@ node pr-shepherd.mjs check --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json --all
 node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
 node pr-shepherd.mjs diagnose --config config.json --target openclaw-78261 --artifact-dir ./artifacts
+node pr-shepherd.mjs rehearsal-queue --feedback ./artifacts/review-feedback.json --pr-state ./artifacts/current-pr.json --state ./state/openclaw-78261.json --output ./artifacts/phase-j-rehearsal-queue.json
 node pr-shepherd.mjs rehearse --config config.json --target openclaw-78261
 node pr-shepherd.mjs repair --config config.json --dry-run
 node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-run
@@ -304,6 +305,25 @@ close with exactly one of `PR: <url>`, `Done`, or `Block`, and report `startComm
 when available. Before posting a PR marker or attaching the feedback packet, fail closed if the branch diff or planned
 artifact evidence would include `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
 `.openclaw/**`; report only repo-relative offending paths, not file contents.
+
+### Phase J supervised rehearsal queue
+
+Phase J turns a recorded Phase I `accepted-for-rehearsal` decision into a supervised, dry-run-only queue packet. Use
+[`phase-j-supervised-rehearsal-queue.md`](examples/field-deploy/phase-j-supervised-rehearsal-queue.md) or
+`rehearsal-queue` when an operator wants the next safe action queued without branch mutation:
+
+```sh
+node pr-shepherd.mjs rehearsal-queue --feedback path/to/review-feedback.json --pr-state path/to/current-pr.json --state path/to/state.json --output path/to/phase-j-rehearsal-queue.json
+```
+
+The packet schema is `pr-shepherd-supervised-rehearsal-queue/v1` and embeds a
+`pr-shepherd-rehearsal-dry-run-packet/v1` with the exact `rehearse` argv, expected head/base refs, repair key,
+operator checklist, freshness/ref gates, and runtime-context contamination guard. It is always `dryRunOnly`,
+`supervised`, `productionMutation=false`, `pushAllowed=false`, `mutatesBranch=false`, and `noLiveApproval=true`.
+`CHANGES_REQUESTED`, stale or expired feedback, non-dirty PR state, mismatched refs, unsupported outcomes, or
+runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
+`.openclaw/**`) block the queue with exact offending repo-relative paths. Phase J may queue a dry-run rehearsal, but
+it never runs live `repair`, creates standing timers, pushes, or carries approval into Phase D/E.
 
 ## Sandbox repair proof harness
 
@@ -707,9 +727,9 @@ no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*`
 a config `notify` fragment for full reports on every 10-minute check, Phase A standing-operations
 runbook with state/evidence rotation and 24-48h observation templates, Phase B observation/noise-control,
 Phase C rehearsal, Phase D operator decision, Phase E execution/audit, Phase F fleet-safe limited autonomy,
-Phase G diagnose-only context, Phase H repair-plan handoff, and Phase I review-state feedback runbooks, a final
-live-readiness GO/NO-GO package, and a reversible user-systemd canary install sketch. Keep the copied env file and
-Telegram routing/token files outside this repo.
+Phase G diagnose-only context, Phase H repair-plan handoff, Phase I review-state feedback, and Phase J supervised
+rehearsal queue runbooks, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install
+sketch. Keep the copied env file and Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
 

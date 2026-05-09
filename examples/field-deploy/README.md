@@ -38,6 +38,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   handoff packet without branch mutation or approval carry-forward.
 - `phase-i-review-state-feedback.md` — Phase I runbook for turning GitHub review state and reviewer feedback into
   a non-mutating operator packet without treating review approval as live repair approval.
+- `phase-j-supervised-rehearsal-queue.md` — Phase J runbook for supervising a one-at-a-time dry-run rehearsal
+  queue and packet without live repair approval, timers, branch mutation, or pushes.
 
 ## Safe install sketch
 
@@ -213,6 +215,19 @@ follow-up PR, rerun Phase G/H, Phase C rehearsal candidate, human maintainer rev
 terminal URL when available, and fails closed before PR/evidence publication if runtime/bootstrap context paths would
 enter the branch or artifact evidence. A GitHub `APPROVED` review is never live repair approval; Phase D/E gates still
 control every branch-mutating repair.
+
+## Phase J supervised rehearsal queue
+
+Use `phase-j-supervised-rehearsal-queue.md` when several Phase H/I candidates need operator triage before any
+one-shot dry-run rehearsal, or after Phase I records `accepted-for-rehearsal` and the operator wants a supervised
+dry-run queued. Phase J writes a `pr-shepherd-supervised-rehearsal-queue/v1` packet with an embedded
+`pr-shepherd-rehearsal-dry-run-packet/v1`, exact `rehearse` argv, expected refs, repair key, freshness/ref gates, and
+contamination guard. It keeps queue state sanitized, reserves at most one active item, verifies refs before
+`rehearse --target <id>`, and records whether each item is done, deferred, or blocked. It starts with `Start`, closes
+with exactly one of `PR: <url>`, `Done`, or `Block`, returns `startCommentUrl` plus the matching terminal URL when
+available, and blocks before PR/evidence publication on stale feedback, `CHANGES_REQUESTED`, non-dirty PR state, ref
+drift, live repair commands, or OpenClaw runtime/bootstrap context evidence. Phase J never runs live `repair`, creates
+standing timers, pushes, or carries approval into Phase D/E.
 
 ## Field doctor
 

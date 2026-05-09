@@ -26,6 +26,7 @@ const packageFiles = {
   phaseGDiagnoseOnly: resolve(here, 'phase-g-diagnose-only-conflict-context.md'),
   phaseHRepairPlanHandoff: resolve(here, 'phase-h-repair-plan-handoff.md'),
   phaseIReviewStateFeedback: resolve(here, 'phase-i-review-state-feedback.md'),
+  phaseJSupervisedRehearsalQueue: resolve(here, 'phase-j-supervised-rehearsal-queue.md'),
 };
 
 function usage(exitCode = 1) {
@@ -232,6 +233,21 @@ function packageDoctor() {
     check(/startCommentUrl/.test(phaseIReviewStateFeedback) && /prUrl/.test(phaseIReviewStateFeedback) && /doneCommentUrl/.test(phaseIReviewStateFeedback) && /blockCommentUrl/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must require returned marker URLs');
     check(/AGENTS\.md/.test(phaseIReviewStateFeedback) && /\.openclaw\/\*\*/.test(phaseIReviewStateFeedback), errors, 'Phase I runbook must include the runtime/bootstrap contamination guard');
     checks.push({ name: 'phase-i-review-state-feedback', ok: true, path: relativeToRepo(packageFiles.phaseIReviewStateFeedback) });
+  }
+
+  const phaseJSupervisedRehearsalQueue = readText(packageFiles.phaseJSupervisedRehearsalQueue, errors);
+  if (phaseJSupervisedRehearsalQueue) {
+    check(/supervised rehearsal queue/i.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must name supervised rehearsal queue operations');
+    check(/Phase H\/I/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must consume Phase H/I candidates');
+    check(/exactly one item may be `active`/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must enforce one active queue item');
+    check(/rehearse --config config\.json --target <target-id>/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must document the target-specific rehearsal command');
+    check(/dry-run packet/i.test(phaseJSupervisedRehearsalQueue) && /pr-shepherd-rehearsal-dry-run-packet\/v1/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must document dry-run packet evidence');
+    check(/accepted-for-rehearsal/.test(phaseJSupervisedRehearsalQueue) && /CHANGES_REQUESTED/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must gate accepted rehearsal and review changes');
+    check(/must not run live `repair`|Phase J never runs `repair`|never runs live `repair`/i.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must block live repair during queue operations');
+    check(/`Start`/.test(phaseJSupervisedRehearsalQueue) && /`PR: <url>`/.test(phaseJSupervisedRehearsalQueue) && /`Done`/.test(phaseJSupervisedRehearsalQueue) && /`Block`/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must preserve Start and terminal ledger markers');
+    check(/startCommentUrl/.test(phaseJSupervisedRehearsalQueue) && /prUrl/.test(phaseJSupervisedRehearsalQueue) && /doneCommentUrl/.test(phaseJSupervisedRehearsalQueue) && /blockCommentUrl/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must require returned marker URLs');
+    check(/AGENTS\.md/.test(phaseJSupervisedRehearsalQueue) && /\.openclaw\/\*\*/.test(phaseJSupervisedRehearsalQueue), errors, 'Phase J runbook must include the runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-j-supervised-rehearsal-queue', ok: true, path: relativeToRepo(packageFiles.phaseJSupervisedRehearsalQueue) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);
