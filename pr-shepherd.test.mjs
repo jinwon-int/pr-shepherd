@@ -9,6 +9,7 @@ import {
   REVIEW_DECISION_OUTCOMES,
   appendActionLedgerEntry,
   appendOperatorDecisionLedgerEntry,
+  appendSupervisedRehearsalQueueLedgerEntry,
   buildConflictArtifactPayload,
   buildConflictDiagnosisBundle,
   buildLiveRepairExecutionHarness,
@@ -18,6 +19,7 @@ import {
   buildReviewStateFeedback,
   buildSituationReportLine,
   buildStatusRows,
+  buildSupervisedRehearsalQueuePacket,
   classifyChecks,
   classifyConflictSet,
   classifyPr,
@@ -477,6 +479,86 @@ test('review-state feedback blocks stale evidence and unsupported transitions', 
   assert.match(unsupported.blockedReasons.join('\n'), /does not support outcome accepted-for-rehearsal/);
 });
 
+test('Phase J supervised rehearsal queue emits a dry-run-only packet and ledger entry', () => {
+  const target = validationTarget({ privatePaths: ['/private/operator'] });
+  const handoff = {
+    schema: 'pr-shepherd-repair-plan-handoff/v1',
+    createdAt: '2026-05-09T01:00:00Z',
+    target: target.id,
+    pr: target.pr,
+    decision: { kind: 'auto-safe-rehearsal', actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL },
+    expectedRefs: { headRefOid: 'head-1', baseRefOid: 'base-1', headBranch: 'feature', baseBranch: 'main' },
+    prState: { classification: 'dirty', checks: { failedCount: 0, pendingCount: 0 } },
+    terminalLedgerMarker: 'Done',
+  };
+  const currentPr = { ...base, headRefOid: 'head-1', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', reviewDecision: 'REVIEW_REQUIRED' };
+  const feedback = buildReviewStateFeedback(handoff, currentPr, {}, {
+    target,
+    decision: 'accepted-for-rehearsal',
+    operator: 'gwakga',
+    summary: 'Queue supervised dry-run from /private/operator; token ghp_123456789012345678901234.',
+    now: new Date('2026-05-09T01:05:00Z'),
+  });
+  assert.equal(feedback.status, 'recorded');
+  assert.equal(feedback.outcome, 'accepted-for-rehearsal');
+
+  const state = { lastSeenHeadOid: 'head-1', lastSeenBaseOid: 'base-1' };
+  const packet = buildSupervisedRehearsalQueuePacket(feedback, currentPr, state, {
+    target,
+    now: new Date('2026-05-09T01:10:00Z'),
+    queueName: 'phase-j-supervised-rehearsal',
+  });
+  assert.equal(packet.schema, 'pr-shepherd-supervised-rehearsal-queue/v1');
+  assert.equal(packet.queueAllowed, true);
+  assert.equal(packet.status, 'queued');
+  assert.equal(packet.dryRunOnly, true);
+  assert.equal(packet.pushAllowed, false);
+  assert.equal(packet.mutatesBranch, false);
+  assert.equal(packet.noLiveApproval, true);
+  assert.equal(packet.dryRunPacket.schema, 'pr-shepherd-rehearsal-dry-run-packet/v1');
+  assert.deepEqual(packet.dryRunPacket.command, ['node', 'pr-shepherd.mjs', 'rehearse', '--config', '<config>', '--target', 'target-1']);
+  assert.equal(packet.queueItem.actionClass, AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL);
+  assert.equal(packet.terminalLedgerMarker, 'Done');
+  assert.doesNotMatch(JSON.stringify(packet), /ghp_123456789012345678901234/);
+  assert.doesNotMatch(JSON.stringify(packet), /\/private\/operator/);
+
+  assert.equal(appendSupervisedRehearsalQueueLedgerEntry(state, target, packet, new Date(packet.createdAt)), true);
+  assert.equal(appendSupervisedRehearsalQueueLedgerEntry(state, target, packet, new Date(packet.createdAt)), false);
+  assert.equal(state.supervisedRehearsalQueueLedger.length, 1);
+  assert.equal(state.supervisedRehearsalQueueLedger[0].dryRunOnly, true);
+});
+
+test('Phase J supervised rehearsal queue blocks stale refs, review changes, and runtime-context evidence', () => {
+  const target = validationTarget();
+  const feedback = {
+    schema: 'pr-shepherd-review-state-feedback/v1',
+    decisionId: 'decision-1',
+    createdAt: '2026-05-09T01:00:00Z',
+    expiresAt: '2026-05-09T07:00:00Z',
+    target: target.id,
+    pr: target.pr,
+    status: 'recorded',
+    decisionAllowed: true,
+    outcome: 'accepted-for-rehearsal',
+    terminalLedgerMarker: 'Done',
+    noLiveApproval: true,
+    expectedRefs: { headRefOid: 'old-head', baseRefOid: 'base-1', headBranch: 'feature', baseBranch: 'main' },
+    reviewState: { classification: 'dirty', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', reviewDecision: 'CHANGES_REQUESTED' },
+    staleEvidence: { stale: false, reasons: [] },
+  };
+  const packet = buildSupervisedRehearsalQueuePacket(feedback, { ...base, headRefOid: 'new-head', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', reviewDecision: 'CHANGES_REQUESTED' }, {}, {
+    target,
+    now: new Date('2026-05-09T01:10:00Z'),
+    artifactEvidencePaths: ['AGENTS.md'],
+  });
+  assert.equal(packet.queueAllowed, false);
+  assert.equal(packet.terminalLedgerMarker, 'Block');
+  assert.deepEqual(packet.evidenceHygiene.offendingRuntimeContextPaths, ['AGENTS.md']);
+  assert.match(packet.blockedReasons.join('\n'), /CHANGES_REQUESTED/);
+  assert.match(packet.blockedReasons.join('\n'), /headRefOid differs/);
+  assert.match(packet.blockedReasons.join('\n'), /AGENTS\.md/);
+});
+
 test('decision-ledger CLI smoke records review feedback without network or branch mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-decision-'));
   try {
@@ -503,6 +585,49 @@ test('decision-ledger CLI smoke records review feedback without network or branc
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.operatorDecisionLedger.length, 1);
     assert.equal(state.operatorDecisionLedger[0].outcome, 'route-code-assisted');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rehearsal-queue CLI smoke writes a dry-run packet without network or branch mutation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-rehearsal-queue-'));
+  try {
+    const feedbackPath = join(dir, 'feedback.json');
+    const prStatePath = join(dir, 'pr-state.json');
+    const statePath = join(dir, 'state.json');
+    const outputPath = join(dir, 'queue.json');
+    const createdAt = new Date(Date.now() - 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    writeFileSync(feedbackPath, JSON.stringify({
+      schema: 'pr-shepherd-review-state-feedback/v1',
+      decisionId: 'decision-queue-1',
+      createdAt,
+      expiresAt,
+      target: 'target-1',
+      pr: 'owner/repo#1',
+      status: 'recorded',
+      decisionAllowed: true,
+      outcome: 'accepted-for-rehearsal',
+      terminalLedgerMarker: 'Done',
+      noLiveApproval: true,
+      expectedRefs: { headRefOid: 'head-1', baseRefOid: 'base-1', headBranch: 'feature', baseBranch: 'main' },
+      reviewState: { classification: 'dirty', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', reviewDecision: 'REVIEW_REQUIRED' },
+      staleEvidence: { stale: false, reasons: [] },
+    }));
+    writeFileSync(prStatePath, JSON.stringify({ ...base, headRefOid: 'head-1', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', reviewDecision: 'REVIEW_REQUIRED' }));
+    writeFileSync(statePath, JSON.stringify({ lastSeenHeadOid: 'head-1', lastSeenBaseOid: 'base-1' }));
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname,
+      'rehearsal-queue', '--feedback', feedbackPath, '--pr-state', prStatePath, '--state', statePath, '--output', outputPath], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.ok, true);
+    assert.equal(report.packet.dryRunPacket.schema, 'pr-shepherd-rehearsal-dry-run-packet/v1');
+    const packet = JSON.parse(readFileSync(outputPath, 'utf8'));
+    assert.equal(packet.queueAllowed, true);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.supervisedRehearsalQueueLedger.length, 1);
+    assert.equal(state.supervisedRehearsalQueueLedger[0].noLiveApproval, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
