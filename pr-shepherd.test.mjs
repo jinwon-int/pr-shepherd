@@ -6,13 +6,16 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   AUTOMATIC_ACTION_CLASSES,
+  REVIEW_DECISION_OUTCOMES,
   appendActionLedgerEntry,
+  appendOperatorDecisionLedgerEntry,
   buildConflictArtifactPayload,
   buildConflictDiagnosisBundle,
   buildLiveRepairExecutionHarness,
   buildPostActionAuditEntry,
   buildRepairRehearsalApprovalPackage,
   buildRepairPlanHandoffFromDiagnosisBundle,
+  buildReviewStateFeedback,
   buildSituationReportLine,
   buildStatusRows,
   classifyChecks,
@@ -34,6 +37,7 @@ import {
   resolveChangelogConflict,
   selectTargets,
   summarizeActionLedger,
+  summarizeOperatorDecisionLedger,
   summarizeObservationLedger,
   validateConfigObject,
 } from './pr-shepherd.mjs';
@@ -393,6 +397,115 @@ test('action ledger appends once and redacts secrets/private paths', () => {
   assert.match(json, /<worktree-root>/);
   assert.match(json, /<state-file>/);
   assert.equal(summarizeActionLedger(state.actionLedger).recent[0].approvalId, 'approval-ledger-1');
+});
+
+test('review-state feedback appends an idempotent sanitized operator decision ledger entry', () => {
+  assert.equal(REVIEW_DECISION_OUTCOMES.includes('route-code-assisted'), true);
+  const target = validationTarget({
+    worktreePath: '/private/operator/worktree',
+    statePath: '/private/operator/state.json',
+    privatePaths: ['/private/operator'],
+  });
+  const handoff = {
+    schema: 'pr-shepherd-repair-plan-handoff/v1',
+    createdAt: '2026-05-08T07:00:00Z',
+    target: target.id,
+    pr: target.pr,
+    url: 'https://github.com/owner/repo/pull/1',
+    decision: { kind: 'code-assisted-review', actionClass: AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT },
+    expectedRefs: { headRefOid: 'head-1', baseRefOid: 'base-1', headBranch: 'feature', baseBranch: 'main' },
+    prState: { classification: 'dirty', checks: { failedCount: 0, pendingCount: 0 } },
+    focusedCommandHints: ['npm test'],
+    terminalLedgerMarker: 'Done',
+  };
+  const currentPr = { ...base, headRefOid: 'head-1', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', reviewDecision: 'REVIEW_REQUIRED' };
+  const state = {};
+  const feedback = buildReviewStateFeedback(handoff, currentPr, state, {
+    target,
+    decision: 'route-code-assisted',
+    operator: 'gwakga',
+    nextOwner: 'Team2',
+    workstream: 'telegram-outbound',
+    summary: 'Review artifact only; see /private/operator/worktree; token ghp_123456789012345678901234.',
+    now: new Date('2026-05-08T08:00:00Z'),
+  });
+
+  assert.equal(feedback.schema, 'pr-shepherd-review-state-feedback/v1');
+  assert.equal(feedback.noLiveApproval, true);
+  assert.equal(feedback.productionMutation, false);
+  assert.equal(feedback.outcome, 'route-code-assisted');
+  assert.equal(feedback.status, 'recorded');
+  assert.equal(feedback.terminalLedgerMarker, 'Done');
+  assert.equal(feedback.staleEvidence.stale, false);
+  assert.match(feedback.riskFlags.join(','), /code-assisted-review-only/);
+  assert.doesNotMatch(JSON.stringify(feedback), /ghp_123456789012345678901234/);
+  assert.doesNotMatch(JSON.stringify(feedback), /\/private\/operator/);
+
+  assert.equal(appendOperatorDecisionLedgerEntry(state, target, feedback, new Date(feedback.createdAt)), true);
+  assert.equal(appendOperatorDecisionLedgerEntry(state, target, feedback, new Date(feedback.createdAt)), false);
+  assert.equal(state.operatorDecisionLedger.length, 1);
+  const summary = summarizeOperatorDecisionLedger(state.operatorDecisionLedger);
+  assert.equal(summary.count, 1);
+  assert.equal(summary.recent[0].outcome, 'route-code-assisted');
+  assert.equal(summary.recent[0].noLiveApproval, true);
+});
+
+test('review-state feedback blocks stale evidence and unsupported transitions', () => {
+  const handoff = {
+    schema: 'pr-shepherd-repair-plan-handoff/v1',
+    createdAt: '2026-05-08T07:00:00Z',
+    target: 'target-1',
+    pr: 'owner/repo#1',
+    decision: { kind: 'code-assisted-review', actionClass: AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT },
+    expectedRefs: { headRefOid: 'old-head', baseRefOid: 'base-1' },
+    prState: { classification: 'dirty', checks: { failedCount: 0, pendingCount: 0 } },
+  };
+  const stale = buildReviewStateFeedback(handoff, { ...base, headRefOid: 'new-head', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }, {}, {
+    target: validationTarget(),
+    decision: 'route-code-assisted',
+  });
+  assert.equal(stale.outcome, 'blocked-stale');
+  assert.equal(stale.terminalLedgerMarker, 'Block');
+  assert.match(stale.blockedReasons.join('\n'), /headRefOid differs/);
+
+  const unsupported = buildReviewStateFeedback({ ...handoff, expectedRefs: { headRefOid: 'head-1', baseRefOid: 'base-1' } }, { ...base, headRefOid: 'head-1', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }, {}, {
+    target: validationTarget(),
+    decision: 'accepted-for-rehearsal',
+  });
+  assert.equal(unsupported.outcome, 'blocked-risk');
+  assert.equal(unsupported.terminalLedgerMarker, 'Block');
+  assert.match(unsupported.blockedReasons.join('\n'), /does not support outcome accepted-for-rehearsal/);
+});
+
+test('decision-ledger CLI smoke records review feedback without network or branch mutation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-decision-'));
+  try {
+    const handoffPath = join(dir, 'handoff.json');
+    const prStatePath = join(dir, 'pr-state.json');
+    const statePath = join(dir, 'state.json');
+    writeFileSync(handoffPath, JSON.stringify({
+      schema: 'pr-shepherd-repair-plan-handoff/v1',
+      createdAt: '2026-05-08T07:00:00Z',
+      target: 'target-1',
+      pr: 'owner/repo#1',
+      decision: { kind: 'code-assisted-review', actionClass: AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT },
+      expectedRefs: { headRefOid: 'head-1', baseRefOid: 'base-1' },
+      prState: { classification: 'dirty', checks: { failedCount: 0, pendingCount: 0 } },
+    }));
+    writeFileSync(prStatePath, JSON.stringify({ ...base, headRefOid: 'head-1', baseRefOid: 'base-1', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }));
+    const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname,
+      'decision-ledger', '--handoff', handoffPath, '--pr-state', prStatePath, '--state', statePath,
+      '--decision', 'route-code-assisted', '--operator', 'gwakga', '--next-owner', 'Team2'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.ok, true);
+    assert.equal(report.feedback.noLiveApproval, true);
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(state.operatorDecisionLedger.length, 1);
+    assert.equal(state.operatorDecisionLedger[0].outcome, 'route-code-assisted');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('observation ledger summarizes 24-48h frequency and recheck suggestions', () => {
