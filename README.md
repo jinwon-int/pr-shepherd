@@ -238,6 +238,35 @@ disposable sandbox/rehearsal worktree, but it must not push, edit the watched wo
 read secrets, or carry approval forward into live repair. Re-run the contamination guard before posting PRs or
 attaching artifacts.
 
+### Phase H repair-plan handoff
+
+Phase H turns a Phase G diagnose-only bundle into an operator-readable, non-mutating
+`pr-shepherd-repair-plan-handoff/v1` package. Use
+[`phase-h-repair-plan-handoff.md`](examples/field-deploy/phase-h-repair-plan-handoff.md) when a worker needs to hand
+off the next safe lane without mutating a branch: wait/recheck, no-op, autoSafe rehearsal, code-assisted artifact
+review, humanOnly handoff, or block.
+
+The handoff is source-backed by the bundle target/PR/head/base/check evidence and carries conflict classification,
+changed-file summaries, diagnosis hints, focused check suggestions, stale-diagnosis detection, risks, blockers,
+review artifact pointers for `codeAssisted`/`humanOnly` paths, and the exact later approval phase required before any
+live repair. It never authorizes a push: autoSafe paths hand off to rehearsal, code-assisted paths hand off to
+explicit review, human-only paths hand off to maintainers, and stale or runtime-context contaminated evidence blocks
+closed with exact offending repo-relative paths.
+
+`diagnose` embeds the repair-plan handoff in its JSON output. To derive one from an existing bundle without contacting
+GitHub or mutating a branch, run:
+
+```sh
+node pr-shepherd.mjs repair-plan --diagnose-bundle path/to/target-conflict-diagnosis.json --output path/to/repair-plan-handoff.json
+```
+
+Phase H preserves the same ledger and evidence rules as earlier phases: post `Start` before analysis, close with
+exactly one of `PR: <url>`, `Done`, or `Block`, and report `startCommentUrl` plus the matching terminal URL when
+available. It must not run `repair`, push, create timers, paste raw transcripts, disclose secrets/private paths, or
+carry approval forward into Phase D/E. Before posting a `PR` marker or attaching plan evidence, fail closed if the
+branch diff or artifact bundle would include `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
+`IDENTITY.md`, or `.openclaw/**`.
+
 Targets may provide diagnosis-only hints for repo-owned paths:
 
 ```json
