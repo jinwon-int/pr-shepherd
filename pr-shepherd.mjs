@@ -616,6 +616,207 @@ export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, class
   }, target);
 }
 
+function focusedCheckExecutionPassed(fields = {}) {
+  if (typeof fields.focusedChecksPassed === 'boolean') return fields.focusedChecksPassed;
+  const result = fields.focusedCheckResult || fields.focusedChecksResult || null;
+  if (result && typeof result === 'object') {
+    if (typeof result.passed === 'boolean') return result.passed;
+    if (typeof result.ok === 'boolean') return result.ok;
+    if (Number.isInteger(Number(result.status))) return Number(result.status) === 0;
+  }
+  const results = Array.isArray(fields.focusedCheckResults) ? fields.focusedCheckResults : [];
+  if (results.length > 0) {
+    return results.every((item) => {
+      if (item && typeof item === 'object') {
+        if (typeof item.passed === 'boolean') return item.passed;
+        if (typeof item.ok === 'boolean') return item.ok;
+        if (Number.isInteger(Number(item.status))) return Number(item.status) === 0;
+      }
+      return item === true;
+    });
+  }
+  return false;
+}
+
+export function buildMinorAutoExecutionController(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const classification = fields.classification || classifyPr(pr || {});
+  const baseOid = fields.baseOid || currentBaseOid(state, pr || {});
+  const repairKey = fields.repairKey || repairPlanKey(pr || {}, baseOid);
+  const plan = fields.plan || planAutomaticAction(target, state, pr, classification, {
+    dryRun: false,
+    now: now.getTime(),
+    selectedTargetCount: fields.selectedTargetCount,
+  });
+  const changedPaths = [...new Set((fields.changedPaths || fields.branchDiffPaths || []).map(normalizedRepoPath).filter(Boolean))].sort();
+  const artifactEvidencePaths = [...new Set((fields.artifactEvidencePaths || []).map(normalizedRepoPath).filter(Boolean))].sort();
+  const minorAutoRepairGate = fields.minorAutoRepairGate || buildMinorAutoRepairGate(target, state, { ...pr, baseRefOid: baseOid }, classification, {
+    now,
+    changedPaths,
+    artifactEvidencePaths,
+    conflictInfo: fields.conflictInfo,
+    selectedTargetCount: fields.selectedTargetCount,
+  });
+  const expectedRemoteHeadOid = fields.expectedRemoteHeadOid || fields.expectedHeadOid || plan?.headRefOid || pr?.headRefOid || state.lastSeenHeadOid || null;
+  const currentRemoteHeadOid = fields.currentRemoteHeadOid || fields.remoteHeadOid || fields.prePushRemoteHeadOid || fields.prePushHeadOid || null;
+  const headBranch = target.headBranch || pr?.headRefName || plan?.headBranch || null;
+  const pushLimit = Number(target.autoPushLimit24h || 0);
+  const recentPushCount = recentAutoPushes(state, now.getTime()).length;
+  const verifyGate = buildVerifyGate(target);
+  const focusedChecksPassed = focusedCheckExecutionPassed(fields);
+  const contamination = findOpenClawRuntimeContextPaths([...changedPaths, ...artifactEvidencePaths]);
+
+  const reasons = [];
+  const gates = [];
+  const gate = (name, ok, reason, details = {}) => {
+    gates.push({ name, ok: Boolean(ok), reason: ok ? null : reason, ...details });
+    if (!ok && reason) reasons.push(reason);
+  };
+
+  gate('plan-lane-minor-auto-safe-repair', plan?.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE, `planned lane must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE}`, { lane: plan?.lane || null });
+  gate('plan-action-class-auto-safe-repair', plan?.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, 'planned actionClass must be auto-safe-repair', { actionClass: plan?.actionClass || null });
+  gate('plan-allowed', plan?.allowed === true, `planned action is blocked: ${(plan?.reasons || []).join('; ') || 'policy denied'}`);
+  gate('plan-push-contract', plan?.pushAllowed === true && plan?.mutatesBranch === true && plan?.writesArtifact !== true && plan?.requiresOperatorApproval !== true,
+    'minor-auto execution requires pushAllowed=true, mutatesBranch=true, writesArtifact=false, and requiresOperatorApproval=false', {
+      pushAllowed: Boolean(plan?.pushAllowed),
+      mutatesBranch: Boolean(plan?.mutatesBranch),
+      writesArtifact: Boolean(plan?.writesArtifact),
+      requiresOperatorApproval: Boolean(plan?.requiresOperatorApproval),
+    });
+  gate('minor-auto-repair-gate', minorAutoRepairGate.gateAllowed === true, `minor-auto gate blocked: ${(minorAutoRepairGate.blockedReasons || []).join('; ') || 'gateAllowed is not true'}`, { minorAutoRepairGate });
+  gate('focused-checks-passed', verifyGate.status !== 'missing' && focusedChecksPassed, focusedChecksPassed ? (verifyGate.reason || 'strict verify gate is missing') : 'focused checks must pass immediately before minor-auto push', { verifyGate, focusedChecksPassed });
+  gate('push-budget', Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit, '24h push budget is exhausted or not configured', { recentPushCount, pushLimit });
+  gate('circuit-breaker', state.lastRepairFailureKey !== repairKey, `repair already failed for current head/base state: ${repairKey}`, { repairKey });
+  gate('pre-push-remote-head-present', Boolean(currentRemoteHeadOid), 'fresh pre-push remote head is required before minor-auto push', { currentRemoteHeadOid });
+  gate('expected-head-force-with-lease', Boolean(headBranch && expectedRemoteHeadOid && currentRemoteHeadOid && currentRemoteHeadOid === expectedRemoteHeadOid),
+    `pre-push remote head changed or is incomplete; refusing force-with-lease. expected ${expectedRemoteHeadOid || '(missing)'}, got ${currentRemoteHeadOid || '(missing)'}`, {
+      headBranch,
+      expectedRemoteHeadOid,
+      currentRemoteHeadOid,
+      forceWithLease: headBranch && expectedRemoteHeadOid ? `${headBranch}:${expectedRemoteHeadOid}` : null,
+    });
+  gate('contamination-guard', contamination.length === 0, `OpenClaw runtime/bootstrap context paths would enter branch diff or artifact evidence: ${contamination.join(', ')}`, { offendingPaths: contamination });
+
+  const blockedReasons = [...new Set([...reasons, ...(minorAutoRepairGate.gateAllowed ? [] : minorAutoRepairGate.blockedReasons || [])])];
+  const executionAllowed = blockedReasons.length === 0;
+  return redactLedgerValue({
+    schema: 'pr-shepherd-minor-auto-execution-controller/v1',
+    createdAt: now.toISOString(),
+    lane: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    url: target.url || pr?.url || null,
+    status: executionAllowed ? 'ready' : 'blocked',
+    executionAllowed,
+    actionClass: executionAllowed ? AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR : AUTOMATIC_ACTION_CLASSES.BLOCK,
+    pushAllowed: executionAllowed,
+    mutatesBranch: executionAllowed,
+    writesArtifact: false,
+    requiresOperatorApproval: false,
+    productionMutation: false,
+    blockedReasons,
+    gates,
+    plan: explainAutomaticActionPlan(plan || {}),
+    minorAutoRepairGate,
+    expectedRefs: {
+      headBranch,
+      baseBranch: target.baseBranch || pr?.baseRefName || null,
+      headRefOid: expectedRemoteHeadOid,
+      baseRefOid: baseOid || null,
+      repairKey,
+    },
+    pushGuard: {
+      expectedRemoteHeadOid,
+      currentRemoteHeadOid,
+      forceWithLease: headBranch && expectedRemoteHeadOid ? `${headBranch}:${expectedRemoteHeadOid}` : null,
+      remoteHeadFresh: Boolean(currentRemoteHeadOid && expectedRemoteHeadOid && currentRemoteHeadOid === expectedRemoteHeadOid),
+    },
+    focusedChecks: {
+      verifyGate,
+      passed: focusedChecksPassed,
+      commands: verifyGate.commands || [],
+    },
+    pushBudget: {
+      limit24h: Number.isFinite(pushLimit) ? pushLimit : null,
+      used24h: recentPushCount,
+      remaining24h: Number.isFinite(pushLimit) && pushLimit > 0 ? Math.max(0, pushLimit - recentPushCount) : 0,
+    },
+    circuitBreaker: {
+      lastRepairFailureKey: state.lastRepairFailureKey || null,
+      repairKey,
+      blocked: state.lastRepairFailureKey === repairKey,
+    },
+    postActionAudit: {
+      pushed: buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'pushed', {
+        state,
+        repairKey,
+        baseOid,
+        beforeHeadOid: expectedRemoteHeadOid,
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        operatorSummary: `${targetPrRef(target) || target.pr || 'target'} auto-repaired minor-auto-safe changes with force-with-lease; verify PR/CI state.`,
+      }),
+      block: buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'block', {
+        state,
+        repairKey,
+        baseOid,
+        actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
+        blockReason: blockedReasons.join('; ') || null,
+        operatorSummary: `${targetPrRef(target) || target.pr || 'target'} minor-auto-safe repair blocked before push.`,
+      }),
+    },
+    closeout: {
+      startMarker: 'Start',
+      terminalMarkers: ['PR: <url>', 'Done', 'Block'],
+      returnFields: ['startCommentUrl', 'prUrl', 'doneCommentUrl', 'blockCommentUrl'],
+    },
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      plannedBranchDiffPaths: changedPaths,
+      plannedArtifactEvidencePaths: artifactEvidencePaths,
+      offendingRuntimeContextPaths: contamination,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    operatorSummary: executionAllowed
+      ? 'minor-auto execution ready: exact path/resolver gates, focused checks, push budget, contamination guard, and expected-head force-with-lease passed'
+      : `minor-auto execution blocked: ${blockedReasons.join('; ')}`,
+    terminalLedgerMarker: executionAllowed ? 'Done' : 'Block',
+  }, target);
+}
+
+export function executeMinorAutoExecutionController(controller = {}, handlers = {}, opts = {}) {
+  if (controller.executionAllowed !== true) {
+    const execution = automaticActionExecution({
+      actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
+      allowed: false,
+      pushAllowed: false,
+      mutatesBranch: false,
+      writesArtifact: false,
+      requiresOperatorApproval: false,
+      reasons: controller.blockedReasons || ['minor-auto execution controller denied the action'],
+    }, 'blocked', { result: controller });
+    if (opts.throwOnBlocked === false) return execution;
+    const err = new Error(`minor-auto execution blocked: ${execution.reasons.join('; ')}`);
+    err.execution = execution;
+    throw err;
+  }
+  if (opts.dryRun) {
+    return automaticActionExecution({
+      actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+      allowed: true,
+      pushAllowed: true,
+      mutatesBranch: true,
+      writesArtifact: false,
+      requiresOperatorApproval: false,
+      reasons: [controller.operatorSummary || 'minor-auto execution ready'],
+    }, 'planned', { dryRun: true, result: controller });
+  }
+  const handler = typeof handlers === 'function' ? handlers : handlers[AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR];
+  if (!handler) return automaticActionExecution(controller.plan || { actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, allowed: true }, 'skipped', { result: controller });
+  return automaticActionExecution(controller.plan || { actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, allowed: true }, 'executed', { result: handler(controller) });
+}
+
 function validateMultiTargetLiveRepair(errors, cfg) {
   const approval = cfg?.automaticActions?.multiTargetLiveRepair;
   if (approval === undefined) return;
@@ -4031,41 +4232,41 @@ function handleRepair(target, dryRun, opts = {}) {
       .trim()
       .split('\n')
       .filter(Boolean);
+    assertNoOpenClawRuntimeContextInBranch(target, `upstream/${target.baseBranch}`);
+
+    const ls = run('git', ['ls-remote', 'origin', `refs/heads/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
     if (postFetchPlan.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE) {
-      const minorGate = buildMinorAutoRepairGate(target, state, { ...pr, baseRefOid: baseOid }, classification, {
+      const controller = buildMinorAutoExecutionController(target, { ...pr, baseRefOid: baseOid }, state, {
         now: Date.now(),
+        plan: postFetchPlan,
+        classification,
+        repairKey,
+        baseOid,
         changedPaths,
         conflictInfo: resolvedConflictInfo,
+        focusedChecksPassed: true,
+        expectedRemoteHeadOid: remoteHead,
+        currentRemoteHeadOid: ls,
         artifactEvidencePaths: opts.artifactDir ? [normalizedRepoPath(opts.artifactDir)] : [],
       });
-      state.lastMinorAutoRepairGate = minorGate;
-      state.lastMinorAutoRepairPreview = minorGate;
-      if (!minorGate.gateAllowed) {
-        state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'block', {
-          state,
-          result: minorGate.status,
-          repairKey,
-          baseOid,
-          actionClass: AUTOMATIC_ACTION_CLASSES.BLOCK,
-          blockReason: minorGate.blockedReasons.join('; '),
-          operatorSummary: minorGate.operatorSummary,
-        });
-        state.lastActionSummary = minorGate.operatorSummary;
+      state.lastMinorAutoExecutionController = controller;
+      state.lastMinorAutoRepairGate = controller.minorAutoRepairGate;
+      state.lastMinorAutoRepairPreview = controller.minorAutoRepairGate;
+      if (!controller.executionAllowed) {
+        state.lastPostActionAudit = controller.postActionAudit.block;
+        state.lastActionSummary = controller.operatorSummary;
         appendPlanLedgerEntry(state, target, postFetchPlan, 'blocked', {
           repairKey,
           expectedHeadOid: pr.headRefOid || null,
           expectedBaseOid: baseOid,
-          rollbackNote: 'minor-auto-safe repair blocked before push; no branch mutation pushed',
-          details: { minorAutoRepairGate: minorGate },
+          rollbackNote: 'minor-auto-safe execution controller blocked before push; no branch mutation pushed',
+          details: { minorAutoExecutionController: controller },
         });
-        notify(target, state, `minor-auto-block:${repairKey}`, `${target.pr} ${minorGate.operatorSummary}`, true);
+        notify(target, state, `minor-auto-block:${repairKey}`, `${target.pr} ${controller.operatorSummary}`, true);
         saveJson(target.statePath, state);
-        throw new Error(`minor-auto-safe repair blocked: ${minorGate.blockedReasons.join('; ')}`);
+        throw new Error(`minor-auto-safe execution blocked: ${controller.blockedReasons.join('; ')}`);
       }
     }
-    assertNoOpenClawRuntimeContextInBranch(target, `upstream/${target.baseBranch}`);
-
-    const ls = run('git', ['ls-remote', 'origin', `refs/heads/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
     if (ls !== remoteHead) throw new Error(`remote head changed; refusing push. expected ${remoteHead}, got ${ls}`);
     run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();

@@ -10,6 +10,7 @@ import {
   REVIEW_DECISION_OUTCOMES,
   appendActionLedgerEntry,
   appendOperatorDecisionLedgerEntry,
+  buildMinorAutoExecutionController,
   buildMinorAutoRepairGate,
   appendSupervisedRehearsalQueueLedgerEntry,
   buildConflictArtifactPayload,
@@ -30,6 +31,7 @@ import {
   classifyPr,
   conflictSetKey,
   executeAutomaticActionPlan,
+  executeMinorAutoExecutionController,
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   buildFleetOperatorBrief,
@@ -1675,6 +1677,68 @@ test('minor-auto-safe repair lane permits only bounded low-risk changed paths wi
   assert.match(riskyGate.blockedReasons.join('\n'), /outside automaticActions\.minorAutoRepair\.pathAllowlist/);
   assert.match(riskyGate.blockedReasons.join('\n'), /require approval/);
   assert.match(riskyGate.blockedReasons.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
+});
+
+test('minor-auto execution controller requires final refs, focused checks, and clean evidence before handler dispatch', () => {
+  const target = validationTarget({
+    headOwner: 'contributor',
+    baseOwner: 'owner',
+    automaticActions: {
+      minorAutoRepair: {
+        enabled: true,
+        scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        branchAllowlist: ['feature'],
+        pathAllowlist: ['CHANGELOG.md', 'docs/**'],
+        resolverAllowlist: ['merge-changelog-top-entry'],
+        zeroRehearsalSafe: true,
+      },
+    },
+  });
+  const pr = { ...base, baseRefOid: 'base-a', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const plan = planAutomaticAction(target, {}, pr, classification, { dryRun: false, now: Date.parse('2026-05-09T09:00:00Z') });
+  const controller = buildMinorAutoExecutionController(target, pr, {}, {
+    now: new Date('2026-05-09T09:01:00Z'),
+    plan,
+    classification,
+    changedPaths: ['CHANGELOG.md'],
+    conflictInfo: classifyConflictSet(['CHANGELOG.md'], target),
+    focusedChecksPassed: true,
+    expectedRemoteHeadOid: 'abc123',
+    currentRemoteHeadOid: 'abc123',
+    baseOid: 'base-a',
+  });
+  assert.equal(controller.schema, 'pr-shepherd-minor-auto-execution-controller/v1');
+  assert.equal(controller.executionAllowed, true);
+  assert.equal(controller.requiresOperatorApproval, false);
+  assert.equal(controller.pushGuard.forceWithLease, 'feature:abc123');
+  assert.equal(controller.postActionAudit.pushed.outcome, 'pushed');
+
+  const executed = executeMinorAutoExecutionController(controller, {
+    [AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR]: (packet) => packet.pushGuard.forceWithLease,
+  });
+  assert.equal(executed.status, 'executed');
+  assert.equal(executed.result, 'feature:abc123');
+
+  const blocked = buildMinorAutoExecutionController(target, pr, {}, {
+    now: new Date('2026-05-09T09:02:00Z'),
+    plan,
+    classification,
+    changedPaths: ['AGENTS.md'],
+    focusedChecksPassed: false,
+    expectedRemoteHeadOid: 'abc123',
+    currentRemoteHeadOid: 'changed',
+    baseOid: 'base-a',
+  });
+  assert.equal(blocked.executionAllowed, false);
+  assert.equal(blocked.actionClass, AUTOMATIC_ACTION_CLASSES.BLOCK);
+  assert.match(blocked.blockedReasons.join('\n'), /focused checks must pass/);
+  assert.match(blocked.blockedReasons.join('\n'), /pre-push remote head changed/);
+  assert.match(blocked.blockedReasons.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
+  assert.deepEqual(blocked.evidenceHygiene.offendingRuntimeContextPaths, ['AGENTS.md']);
+  const blockedExecution = executeMinorAutoExecutionController(blocked, {}, { throwOnBlocked: false });
+  assert.equal(blockedExecution.status, 'blocked');
 });
 
 test('automatic action explanations cover every action class without executing handlers', () => {
