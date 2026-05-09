@@ -305,6 +305,26 @@ repair run. It preserves hard safety boundaries: no auto-merge, no fix-until-gre
 mutation, no risky auto-push, no provider sends, no Gateway restart, and no raw runtime/bootstrap evidence.
 Major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
+## Advanced automation roadmap opinion
+
+Treat Phase O as the safe rollout baseline and add later automation as opt-in product rungs, not as an automatic
+promotion path. Recommended order:
+
+1. **Phase P minor-auto auto-merge**: default off; only merge clean post-push minor-auto outputs that still satisfy
+   branch protection, review/label policy, changed-path and resolver allowlists, fresh refs, configured merge method,
+   and runtime/bootstrap evidence hygiene.
+2. **Phase Q bounded fix-until-green**: default off; cap retries at one or two attempts in the same
+   target/path/resolver/risk class, with fresh checks and audit for each attempt. Any drift, new risk class, reviewer
+   objection, stale ref, or exhausted budget opens the circuit breaker.
+3. **Phase R risky-change approval packet**: prepare exact diff scope, commands, rollback/disable plan, expected refs,
+   checks, and risk class for one-click operator approval; do not push risky changes unattended by default.
+4. **Phase S optional risky auto-push governance**: consider only after P/Q/R evidence is boring and stable, and only
+   behind fleet-level policy, explicit user selection, fast stop controls, and high-signal audit output.
+
+Every rung should be independently selectable per repository/target, branch, path, resolver, risk class, attempt
+budget, cooldown, required checks, reviewer/label conditions, observation window, notification mode, and circuit
+breaker. The default operator posture remains observe-only.
+
 ## Field doctor
 
 When a copied unit, wrapper, or config change behaves unexpectedly, run the same read-only doctor sequence

@@ -430,6 +430,31 @@ execution, auto-merge, fix-until-green loops, provider sends, Gateway restarts, 
 future branch push; every live repair still needs a fresh Phase N controller run and final gates, and
 major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
+### Ops/product opinion: advanced automation roadmap
+
+Phase O should remain the production safety floor, not the ceiling. The next roadmap can make auto-merge,
+bounded fix-until-green, and risky auto-push technically implementable only as separately selectable lanes:
+
+- **Phase P: minor-auto auto-merge** — default off; merge only a post-push minor-auto result whose CI, branch
+  protection, review/label state, changed paths, resolver identity, refs, merge method, and target branch all still
+  match explicit target policy. Never merge semantic, dependency/lockfile, CI/security/config, provider-behavior,
+  `codeAssisted`/`humanOnly`, or runtime/bootstrap changes.
+- **Phase Q: bounded fix-until-green** — default off; permit at most one or two retries, each staying in the same
+  target/path/resolver/risk class with a fresh diff summary, focused checks, audit packet, and circuit-breaker check.
+  Any drift, new file class, reviewer objection, stale refs, failed precondition, or exhausted budget routes to human
+  approval instead of another loop.
+- **Phase R: risky-change approval packet** — prepare the exact diff scope, commands, rollback/disable guidance,
+  expected refs, checks, and risk class for one-click operator approval; do not make risky production pushes
+  unattended by default.
+- **Phase S: optional risky auto-push governance** — only after P/Q/R evidence proves stable, and only behind
+  fleet-level policy, explicit per-target/user enablement, strong stop controls, and prominent audit reporting.
+
+The product shape should be a visible ladder (`observe-only` → `dry-run` → `minor-auto push` → `minor-auto
+merge` → `bounded retry` → `risky approval-prepared` → optional `risky unattended`). Each rung needs independent
+configuration by repository/target, branch, path, resolver, risk class, attempt budget, cooldown, required checks,
+reviewer/label conditions, observation window, notification mode, and circuit-breaker policy. Conservative defaults
+stay observe-only; operators opt into each higher rung deliberately.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
