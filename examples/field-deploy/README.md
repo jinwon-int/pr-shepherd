@@ -36,6 +36,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   bundles, sandbox-only evidence collection, and safe per-repo diagnosis hints.
 - `phase-h-repair-plan-handoff.md` — Phase H runbook for converting diagnose-only evidence into a repair-plan
   handoff packet without branch mutation or approval carry-forward.
+- `phase-i-review-state-feedback.md` — Phase I runbook for turning GitHub review state and reviewer feedback into
+  a non-mutating operator packet without treating review approval as live repair approval.
 
 ## Safe install sketch
 
@@ -200,6 +202,17 @@ follow-up worker. Phase H summarizes target refs, current state, affected paths,
 risks, blockers, and the later approval required before mutation. It starts with `Start`, closes with exactly one of
 `PR: <url>`, `Done`, or `Block`, and fails closed before PR/evidence publication if the branch diff or artifact bundle
 would include OpenClaw runtime/bootstrap context paths.
+
+## Phase I review-state feedback
+
+Use `phase-i-review-state-feedback.md` after a reviewable PR, Phase H handoff, or operator issue has reviewer
+feedback that needs an operator-safe response. Phase I reads GitHub `reviewDecision`, latest reviews, comments,
+checks, and merge state, then records a concise feedback packet with one safe next lane: continue observation,
+follow-up PR, rerun Phase G/H, Phase C rehearsal candidate, human maintainer review, or block. It starts with
+`Start`, closes with exactly one of `PR: <url>`, `Done`, or `Block`, returns `startCommentUrl` plus the matching
+terminal URL when available, and fails closed before PR/evidence publication if runtime/bootstrap context paths would
+enter the branch or artifact evidence. A GitHub `APPROVED` review is never live repair approval; Phase D/E gates still
+control every branch-mutating repair.
 
 ## Field doctor
 
