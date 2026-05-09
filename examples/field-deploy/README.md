@@ -305,6 +305,14 @@ repair run. It preserves hard safety boundaries: no auto-merge, no fix-until-gre
 mutation, no risky auto-push, no provider sends, no Gateway restart, and no raw runtime/bootstrap evidence.
 Major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
+## Phase P advanced automation feasibility review
+
+Use `phase-p-advanced-automation-feasibility.md` to keep the advanced automation roadmap implementable but default-off
+and user-selectable. It records L3 minor-auto post-push auto-merge as the next narrow feasible lane, L4
+fix-until-green as a capped retry controller only, and L5 risky auto-push as approval-prepared evidence before any
+human-approved one-click push. It also defines a shared decision object, final auto-merge admission gates, later-lane
+constraints, closeout markers, and the same runtime/bootstrap contamination guard used by earlier phases.
+
 ## Field doctor
 
 When a copied unit, wrapper, or config change behaves unexpectedly, run the same read-only doctor sequence

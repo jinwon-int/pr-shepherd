@@ -30,6 +30,7 @@ const packageFiles = {
   phaseKRehearsalEvidenceDigest: resolve(here, 'phase-k-rehearsal-evidence-digest.md'),
   phaseMBoundedAutoSafeMinorRepair: resolve(here, 'phase-m-bounded-auto-safe-minor-repair.md'),
   phaseOMinorAutoRolloutControls: resolve(here, 'phase-o-minor-auto-production-rollout-controls.md'),
+  phasePAdvancedAutomationFeasibility: resolve(here, 'phase-p-advanced-automation-feasibility.md'),
 };
 
 function usage(exitCode = 1) {
@@ -298,6 +299,20 @@ function packageDoctor() {
     check(/`Start`/.test(phaseOMinorAutoRolloutControls) && /`Done`/.test(phaseOMinorAutoRolloutControls) && /`Block`/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must preserve Start and terminal ledger markers');
     check(/AGENTS\.md/.test(phaseOMinorAutoRolloutControls) && /\.openclaw\/\*\*/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must include runtime/bootstrap contamination guard');
     checks.push({ name: 'phase-o-minor-auto-production-rollout-controls', ok: true, path: relativeToRepo(packageFiles.phaseOMinorAutoRolloutControls) });
+  }
+
+  const phasePAdvancedAutomationFeasibility = readText(packageFiles.phasePAdvancedAutomationFeasibility, errors);
+  if (phasePAdvancedAutomationFeasibility) {
+    check(/advanced automation feasibility/i.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must name advanced automation feasibility');
+    check(/default-off/i.test(phasePAdvancedAutomationFeasibility) && /user-selectable/i.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must keep advanced automation default-off and user-selectable');
+    check(/minor-auto post-push auto-merge/i.test(phasePAdvancedAutomationFeasibility) && /bounded fix-until-green/i.test(phasePAdvancedAutomationFeasibility) && /approval-prepared risky push/i.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must cover L3/L4/L5 feasibility lanes');
+    check(/branch protection/i.test(phasePAdvancedAutomationFeasibility) && /required check/i.test(phasePAdvancedAutomationFeasibility) && /review objections?/i.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must document auto-merge admission gates');
+    check(/max attempts/i.test(phasePAdvancedAutomationFeasibility) && /capped at 1–2/.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must constrain fix-until-green attempts');
+    check(/one bounded push/i.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must constrain risky one-click approval to one push');
+    check(/`Start`/.test(phasePAdvancedAutomationFeasibility) && /`PR: <url>`/.test(phasePAdvancedAutomationFeasibility) && /`Done`/.test(phasePAdvancedAutomationFeasibility) && /`Block`/.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must preserve Start and terminal ledger markers');
+    check(/startCommentUrl/.test(phasePAdvancedAutomationFeasibility) && /prUrl/.test(phasePAdvancedAutomationFeasibility) && /doneCommentUrl/.test(phasePAdvancedAutomationFeasibility) && /blockCommentUrl/.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must require returned marker URLs');
+    check(/AGENTS\.md/.test(phasePAdvancedAutomationFeasibility) && /\.openclaw\/\*\*/.test(phasePAdvancedAutomationFeasibility), errors, 'Phase P runbook must include runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-p-advanced-automation-feasibility', ok: true, path: relativeToRepo(packageFiles.phasePAdvancedAutomationFeasibility) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);

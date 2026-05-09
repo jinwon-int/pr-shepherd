@@ -430,6 +430,19 @@ execution, auto-merge, fix-until-green loops, provider sends, Gateway restarts, 
 future branch push; every live repair still needs a fresh Phase N controller run and final gates, and
 major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
+### Phase P advanced automation feasibility review
+
+Phase P records the feasibility posture for the user-selectable advanced automation ladder. Use
+[`phase-p-advanced-automation-feasibility.md`](examples/field-deploy/phase-p-advanced-automation-feasibility.md) as the
+planning reference for splitting later implementation issues: L3 minor-auto post-push auto-merge is feasible as the
+next narrow default-off lane; L4 bounded fix-until-green is feasible only as a capped retry controller; L5 risky
+auto-push should first ship as approval-prepared evidence with one-click approval for exactly one bounded push. Fully
+unattended risky auto-push remains a later fleet-governance decision, not a default roadmap step.
+
+The same runtime/bootstrap contamination guard, ledger markers, target/path/resolver/risk scoping, focused checks,
+budgets, circuit breakers, and sanitized evidence rules apply before any PR marker, auto-merge, retry, or approval
+packet publication.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
