@@ -238,6 +238,22 @@ disposable sandbox/rehearsal worktree, but it must not push, edit the watched wo
 read secrets, or carry approval forward into live repair. Re-run the contamination guard before posting PRs or
 attaching artifacts.
 
+### Phase H repair-plan handoff operations
+
+Phase H turns a Phase G diagnose-only bundle into an operator-readable repair-plan packet. Use
+[`phase-h-repair-plan-handoff.md`](examples/field-deploy/phase-h-repair-plan-handoff.md) when a worker needs to
+hand off the next safe lane without mutating a branch: wait/recheck, no-op, autoSafe rehearsal, code-assisted
+artifact review, humanOnly handoff, or block. The packet should name target refs, affected paths, policy
+classification, focused verification hints, risks, blockers, and the exact later approval phase required before any
+live repair.
+
+Phase H preserves the same ledger and evidence rules as earlier phases: post `Start` before analysis, close with
+exactly one of `PR: <url>`, `Done`, or `Block`, and report `startCommentUrl` plus the matching terminal URL when
+available. It must not run `repair`, push, create timers, paste raw transcripts, disclose secrets/private paths, or
+carry approval forward into Phase D/E. Before posting a `PR` marker or attaching plan evidence, fail closed if the
+branch diff or artifact bundle would include `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
+`IDENTITY.md`, or `.openclaw/**`.
+
 Targets may provide diagnosis-only hints for repo-owned paths:
 
 ```json
