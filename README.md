@@ -348,6 +348,23 @@ publishing digest evidence, close with exactly one of `PR: <url>`, `Done`, or `B
 matching terminal URL when available, and never approve live `repair`, create timers, push, or carry approval into
 Phase D/E.
 
+### Phase L Phase D operator packet workflow
+
+Phase L turns an allowed Phase K candidate into a reviewable Phase D operator decision packet. Use
+[`phase-l-phase-d-operator-packet-workflow.md`](examples/field-deploy/phase-l-phase-d-operator-packet-workflow.md)
+after the Phase K digest records `candidateAllowed=true` and before any operator records one-shot Phase D/E approval
+metadata. Phase L re-reads current PR refs and dirty classification, confirms the candidate gate, focused-check gate,
+repair key, exact live argv, allowed branch, push budget, rollback note, and abort criteria, then publishes a short
+sanitized packet for a human GO/NO-GO/Block decision.
+
+It is approval preparation only: `productionMutation=false`, live `repair` is not run, pushes are not attempted,
+timers are not created, approval config is not edited on the operator's behalf, and Phase K candidacy is not treated as
+live repair approval. Phase L keeps the same ledger boundary as earlier phases: post `Start` before packet assembly,
+close with exactly one of `PR: <url>`, `Done`, or `Block`, and report `startCommentUrl` plus the matching terminal URL
+when available. Before posting a PR marker, attaching packet evidence, or letting a runner create a review PR, fail
+closed if branch diff paths or planned artifact evidence would include `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`,
+`HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`; report only exact repo-relative offending paths.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
