@@ -42,6 +42,7 @@ export const FLEET_TARGET_STATE_TIERS = Object.freeze([
 export const DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_REPAIR_PLAN_HANDOFF_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_SUPERVISED_REHEARSAL_QUEUE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+export const DEFAULT_REHEARSAL_EVIDENCE_DIGEST_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_ACTION_LEDGER_LIMIT = 50;
 export const DEFAULT_OBSERVATION_LEDGER_LIMIT = 288; // 48h at a 10-minute standing-ops cadence.
 export const DEFAULT_STRICT_VERIFY_REQUIRED = true;
@@ -1378,7 +1379,9 @@ function assertMultiTargetLiveRepairAllowed(cfg, targets, args) {
 export function targetStateTier(target = {}, state = {}, now = Date.now()) {
   const approval = liveRepairApprovalState(target, state, {}, now);
   if (approval.state === 'unused') return 'live-approved-once';
-  if (state.lastRepairRehearsal?.approvalPackage?.schema === 'pr-shepherd-repair-rehearsal-approval/v1') return 'phase-d-ready';
+  if (state.lastRehearsalEvidenceDigest?.schema === 'pr-shepherd-rehearsal-evidence-digest/v1'
+    && state.lastRehearsalEvidenceDigest?.phaseDCandidateGate?.candidateAllowed === true) return 'phase-d-ready';
+  if (state.lastRepairRehearsal?.approvalPackage?.schema === 'pr-shepherd-repair-rehearsal-approval/v1') return 'rehearsal-ready';
   if (state.lastKind === 'dirty' || state.lastWarningKind === 'dirty') return 'rehearsal-ready';
   return 'check-only';
 }
@@ -1804,6 +1807,167 @@ export function buildRepairRehearsalApprovalPackage(target = {}, pr = {}, state 
   return redactLedgerValue(approvalPackage, target);
 }
 
+function rehearsalDigestId(digest = {}) {
+  const refs = digest.expectedRefs || {};
+  return [
+    'rehearsal-digest',
+    digest.target || 'target',
+    digest.sourceRehearsal?.at || digest.createdAt || 'rehearsal',
+    refs.repairKey || 'repair-key',
+  ].join(':');
+}
+
+function phaseDCandidateGateReasons({ target = {}, pr = {}, state = {}, rehearsal = {}, classification = {}, now, maxAgeMs, branchDiffPaths = [], artifactEvidencePaths = [] }) {
+  const approvalPackage = rehearsal?.approvalPackage;
+  const expectedRefs = approvalPackage?.expectedRefs || {};
+  const baseOid = currentBaseOid(state, pr);
+  const repairKey = rehearsal?.repairKey || expectedRefs.repairKey || repairPlanKey(pr, baseOid);
+  const verifyGate = buildVerifyGate(target);
+  const contamination = findOpenClawRuntimeContextPaths([...branchDiffPaths, ...artifactEvidencePaths]);
+  const reasons = [];
+  const gates = [];
+  const gate = (name, ok, reason, details = {}) => {
+    gates.push({ name, ok: Boolean(ok), reason: ok ? null : reason, ...details });
+    if (!ok && reason) reasons.push(reason);
+  };
+
+  gate('rehearsal-approval-package', approvalPackage?.schema === 'pr-shepherd-repair-rehearsal-approval/v1', 'repair rehearsal approvalPackage is required for Phase D candidacy', { schema: approvalPackage?.schema || null });
+  gate('dry-run-only', rehearsal && approvalPackage?.dryRunOnly !== false && approvalPackage?.productionMutation !== true, 'Phase D candidate evidence must be dry-run only and non-mutating');
+  gate('dirty-current-pr', classification?.kind === 'dirty', `current classification ${classification?.kind || 'unknown'} is not dirty; Phase D candidate gate only admits dirty repair rehearsals`, { classification: classification?.kind || 'unknown' });
+
+  const rehearsalAt = Date.parse(rehearsal?.at || '');
+  gate('fresh-rehearsal', Number.isFinite(rehearsalAt) && rehearsalAt <= now.getTime() + 5 * 60 * 1000 && now.getTime() - rehearsalAt <= maxAgeMs, 'repair rehearsal evidence is missing, in the future, or too old for Phase D candidacy', { rehearsalAt: rehearsal?.at || null, maxAgeMs });
+
+  const evidenceExpiresAt = Date.parse(approvalPackage?.evidenceBundle?.evidenceExpiresAt || '');
+  gate('evidence-not-expired', Number.isFinite(evidenceExpiresAt) && now.getTime() <= evidenceExpiresAt, 'repair rehearsal evidence bundle expiry is missing or expired', { evidenceExpiresAt: approvalPackage?.evidenceBundle?.evidenceExpiresAt || null });
+
+  gate('target-and-refs-match', (!rehearsal?.target || rehearsal.target === target.id)
+    && (!expectedRefs.headRefOid || expectedRefs.headRefOid === (pr.headRefOid || state.lastSeenHeadOid || null))
+    && (!expectedRefs.baseRefOid || expectedRefs.baseRefOid === (baseOid || null))
+    && (!expectedRefs.repairKey || expectedRefs.repairKey === repairKey), 'target, expected head/base refs, or repairKey do not match current rehearsal evidence', {
+    target: target.id || null,
+    expectedRefs,
+    currentRefs: {
+      headRefOid: pr.headRefOid || state.lastSeenHeadOid || null,
+      baseRefOid: baseOid || null,
+      repairKey,
+    },
+  });
+
+  const ledger = Array.isArray(state.actionLedger) ? state.actionLedger : [];
+  gate('action-ledger-rehearsed', ledger.some((entry) => entry?.actionClass === AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL
+    && entry?.result === 'rehearsed'
+    && entry?.repairKey === repairKey), 'actionLedger must include a rehearsed repair entry for the current repairKey', { repairKey });
+  gate('strict-verify-gate', verifyGate.status !== 'missing', verifyGate.reason || 'strict verify gate is missing', { verifyGate });
+  gate('contamination-guard', contamination.length === 0, `OpenClaw runtime/bootstrap context paths would enter rehearsal digest evidence: ${contamination.join(', ')}`, { offendingPaths: contamination });
+
+  return { reasons: [...new Set(reasons)], gates, contamination, repairKey, baseOid, verifyGate };
+}
+
+export function buildPhaseDCandidateGate(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const rehearsal = fields.rehearsal || state.lastRepairRehearsal || {};
+  const maxAgeMs = fields.maxAgeMs === undefined ? DEFAULT_REHEARSAL_EVIDENCE_DIGEST_MAX_AGE_MS : Number(fields.maxAgeMs);
+  const classification = fields.classification || classifyPr(pr || {});
+  const branchDiffPaths = Array.isArray(fields.branchDiffPaths) ? fields.branchDiffPaths : [];
+  const artifactEvidencePaths = Array.isArray(fields.artifactEvidencePaths) ? fields.artifactEvidencePaths : [];
+  const { reasons, gates, contamination, repairKey, baseOid, verifyGate } = phaseDCandidateGateReasons({
+    target,
+    pr,
+    state,
+    rehearsal,
+    classification,
+    now,
+    maxAgeMs,
+    branchDiffPaths,
+    artifactEvidencePaths,
+  });
+  return redactLedgerValue({
+    schema: 'pr-shepherd-phase-d-candidate-gate/v1',
+    createdAt: now.toISOString(),
+    target: target.id || rehearsal.target || null,
+    pr: targetPrRef(target) || target.pr || null,
+    candidateAllowed: reasons.length === 0,
+    status: reasons.length === 0 ? 'candidate' : 'blocked',
+    blockedReasons: reasons,
+    actionClass: reasons.length === 0 ? AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR : AUTOMATIC_ACTION_CLASSES.BLOCK,
+    requiredNextApproval: 'Phase D one-shot auto-safe-repair approval',
+    noLiveApproval: true,
+    productionMutation: false,
+    gates,
+    expectedRefs: {
+      ...(rehearsal.approvalPackage?.expectedRefs || {}),
+      repairKey,
+      baseRefOid: baseOid || rehearsal.approvalPackage?.expectedRefs?.baseRefOid || null,
+    },
+    verifyGate,
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      plannedBranchDiffPaths: branchDiffPaths.slice().sort(),
+      plannedArtifactEvidencePaths: artifactEvidencePaths.slice().sort(),
+      offendingRuntimeContextPaths: contamination,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+    terminalLedgerMarker: reasons.length === 0 ? 'Done' : 'Block',
+  }, target);
+}
+
+export function buildRehearsalEvidenceDigest(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const rehearsal = fields.rehearsal || state.lastRepairRehearsal || {};
+  const classification = fields.classification || classifyPr(pr || {});
+  const phaseDCandidateGate = fields.phaseDCandidateGate || buildPhaseDCandidateGate(target, pr, state, { ...fields, now, rehearsal, classification });
+  const approvalPackage = rehearsal?.approvalPackage || {};
+  const expectedRefs = phaseDCandidateGate.expectedRefs || approvalPackage.expectedRefs || {};
+  const digest = {
+    schema: 'pr-shepherd-rehearsal-evidence-digest/v1',
+    digestId: null,
+    createdAt: now.toISOString(),
+    target: target.id || rehearsal.target || null,
+    pr: targetPrRef(target) || target.pr || approvalPackage.pr || null,
+    url: target.url || approvalPackage.url || pr.url || null,
+    dryRunOnly: true,
+    productionMutation: false,
+    mutatesBranch: false,
+    pushAllowed: false,
+    noLiveApproval: true,
+    sourceRehearsal: {
+      at: rehearsal.at || null,
+      repairKey: rehearsal.repairKey || expectedRefs.repairKey || null,
+      approvalPackageSchema: approvalPackage.schema || null,
+    },
+    expectedRefs,
+    currentRefs: {
+      headBranch: target.headBranch || pr.headRefName || expectedRefs.headBranch || null,
+      baseBranch: target.baseBranch || pr.baseRefName || expectedRefs.baseBranch || null,
+      headRefOid: pr.headRefOid || state.lastSeenHeadOid || null,
+      baseRefOid: currentBaseOid(state, pr) || null,
+      repairKey: expectedRefs.repairKey || null,
+    },
+    classification: classification?.kind || 'unknown',
+    checkSummary: {
+      failedCount: classification?.checks?.failed?.length || 0,
+      pendingCount: classification?.checks?.pending?.length || 0,
+    },
+    approvalPackageSummary: {
+      approvalText: approvalPackage.approvalText || null,
+      abortCriteriaCount: Array.isArray(approvalPackage.abortCriteria) ? approvalPackage.abortCriteria.length : 0,
+      rollbackNote: approvalPackage.rollbackNote || null,
+      evidenceExpiresAt: approvalPackage.evidenceBundle?.evidenceExpiresAt || null,
+    },
+    phaseDCandidateGate,
+    evidenceHygiene: phaseDCandidateGate.evidenceHygiene,
+    terminalLedgerMarker: phaseDCandidateGate.terminalLedgerMarker,
+    nextStep: phaseDCandidateGate.candidateAllowed
+      ? 'Prepare a separate Phase D operator packet; do not run live repair until one-shot approval metadata is recorded and Phase E gates pass.'
+      : 'Refresh rehearsal evidence or close Block with the candidate-gate reasons; do not carry this digest into Phase D.',
+  };
+  digest.digestId = fields.id || rehearsalDigestId(digest);
+  return redactLedgerValue(digest, target);
+}
+
 function buildAutomaticActionPlan(actionClass, fields = {}) {
   const plan = {
     actionClass,
@@ -1887,6 +2051,15 @@ function liveRepairGateFailures(target, state, pr, now = Date.now()) {
         if (!Number.isFinite(phaseDExpiresAt)) failures.push('Phase D approval packet expiry is required');
         else if (now > phaseDExpiresAt) failures.push('Phase D approval packet evidence has expired');
       }
+      const digest = state.lastRehearsalEvidenceDigest || rehearsal.evidenceDigest;
+      const candidateGate = digest?.phaseDCandidateGate || rehearsal.phaseDCandidateGate;
+      if (!isPlainObject(digest) || digest.schema !== 'pr-shepherd-rehearsal-evidence-digest/v1') failures.push('Phase K rehearsal evidence digest is required for Phase D activation');
+      else {
+        if (digest.target && digest.target !== target.id) failures.push('Phase K rehearsal evidence digest target does not match');
+        if (digest.sourceRehearsal?.repairKey && digest.sourceRehearsal.repairKey !== expectedRepairKey) failures.push('Phase K rehearsal evidence digest repairKey does not match current PR state');
+      }
+      if (!isPlainObject(candidateGate) || candidateGate.schema !== 'pr-shepherd-phase-d-candidate-gate/v1') failures.push('Phase D candidate gate is required for live repair activation');
+      else if (candidateGate.candidateAllowed !== true) failures.push(`Phase D candidate gate is blocked: ${(candidateGate.blockedReasons || []).join('; ') || 'candidateAllowed is not true'}`);
       const ledger = Array.isArray(state.actionLedger) ? state.actionLedger : [];
       const hasRehearsalLedgerEntry = ledger.some((entry) => entry?.actionClass === AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL
         && entry?.result === 'rehearsed'
@@ -3249,6 +3422,13 @@ function handleRepair(target, dryRun, opts = {}) {
         },
         now,
       });
+      state.lastRehearsalEvidenceDigest = buildRehearsalEvidenceDigest(target, pr, state, {
+        now,
+        rehearsal: state.lastRepairRehearsal,
+        classification,
+        artifactEvidencePaths: opts.artifactDir ? [normalizedRepoPath(opts.artifactDir)] : [],
+      });
+      state.lastRepairRehearsal.evidenceDigest = state.lastRehearsalEvidenceDigest;
       sendSituationReport(target, state, pr, classification, `situation:dry-run:${preRepairKey}`);
       saveJson(target.statePath, state);
       console.log(`[pr-shepherd:${target.id}] action ${execution.status}: ${execution.actionClass}; ${execution.reasons.join('; ')}`);
@@ -3260,6 +3440,12 @@ function handleRepair(target, dryRun, opts = {}) {
         approvalText: approvalPackage.approvalText,
         abortCriteria: approvalPackage.abortCriteria,
         rollbackNote: approvalPackage.rollbackNote,
+        rehearsalEvidenceDigest: {
+          schema: state.lastRehearsalEvidenceDigest.schema,
+          digestId: state.lastRehearsalEvidenceDigest.digestId,
+          phaseDCandidateAllowed: state.lastRehearsalEvidenceDigest.phaseDCandidateGate.candidateAllowed,
+          blockedReasons: state.lastRehearsalEvidenceDigest.phaseDCandidateGate.blockedReasons,
+        },
       }, null, 2));
       return;
     }

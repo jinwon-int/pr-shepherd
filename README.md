@@ -325,6 +325,29 @@ runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEAR
 `.openclaw/**`) block the queue with exact offending repo-relative paths. Phase J may queue a dry-run rehearsal, but
 it never runs live `repair`, creates standing timers, pushes, or carries approval into Phase D/E.
 
+### Phase K rehearsal evidence digest
+
+Phase K turns completed Phase C/J dry-run rehearsal evidence into a compact, operator-readable digest and a
+fail-closed `pr-shepherd-phase-d-candidate-gate/v1`. Use
+[`phase-k-rehearsal-evidence-digest.md`](examples/field-deploy/phase-k-rehearsal-evidence-digest.md) when the source
+rehearsal packet is already recorded, after `rehearse --target <id>`, and before preparing any Phase D operator
+packet. The digest schema is `pr-shepherd-rehearsal-evidence-digest/v1` and records only sanitized target, PR,
+expected/current refs, repair key, source evidence links, dry-run command summary, focused-check verdicts, check
+counts, approval-package summary, freshness, rollback note, gate outcomes, and evidence hygiene.
+
+It always remains evidence-only: `dryRunEvidenceOnly=true`, `productionMutation=false`, `pushAllowed=false`,
+`mutatesBranch=false`, and `noLiveApproval=true`. `candidateAllowed=true` means the rehearsal is eligible to become
+Phase D input; it is not live repair approval and still cannot bypass Phase D/E one-shot metadata, focused checks, push
+budget, expected-head `--force-with-lease`, or a fresh contamination check. Missing rehearsal package/ledger entries,
+non-dirty current PR state, stale or mismatched refs, expired evidence, missing strict focused checks, or
+runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
+`.openclaw/**`) close as `Block` with exact repo-relative offending paths or blocked reasons.
+
+Phase K preserves the same ledger and contamination boundaries as earlier phases: post `Start` before reading or
+publishing digest evidence, close with exactly one of `PR: <url>`, `Done`, or `Block`, report `startCommentUrl` plus the
+matching terminal URL when available, and never approve live `repair`, create timers, push, or carry approval into
+Phase D/E.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
