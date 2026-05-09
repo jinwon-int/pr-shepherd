@@ -369,6 +369,22 @@ inputs plus branch diff paths and planned artifact evidence are checked against 
 closed on `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`, reporting
 only exact repo-relative offending paths.
 
+### Phase M bounded auto-safe minor repair operations
+
+Phase M is the narrow, supervised lane for one reviewable minor repair after prior evidence or an operator issue has
+reduced the work to a deterministic patch. Use
+[`phase-m-bounded-auto-safe-minor-repair.md`](examples/field-deploy/phase-m-bounded-auto-safe-minor-repair.md) only
+when the operator provides a bounded scope, approved path set, diff budget, source evidence, and verification plan. It
+is intended for documentation/runbook clarifications, example text, small test expectation fixes that match documented
+behavior, formatting, spelling, or link corrections.
+
+It is not standing automation: `autoSafeMinor=true`, `productionMutation=false`, `liveRepair=false`,
+`pushAllowed=false`, and `timers=false`. Phase M starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or
+`Block`, and reports `startCommentUrl` plus the matching terminal URL when available. Before editing, before attaching
+evidence, and again before PR creation, the final diff and planned evidence paths are checked against the
+runtime/bootstrap denylist; fail closed on `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`,
+`IDENTITY.md`, or `.openclaw/**`, reporting only exact repo-relative offending paths.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
