@@ -325,6 +325,24 @@ runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEAR
 `.openclaw/**`) block the queue with exact offending repo-relative paths. Phase J may queue a dry-run rehearsal, but
 it never runs live `repair`, creates standing timers, pushes, or carries approval into Phase D/E.
 
+### Phase K rehearsal evidence digest
+
+Phase K turns completed Phase C/J dry-run rehearsal evidence into a compact, operator-readable digest. Use
+[`phase-k-rehearsal-evidence-digest.md`](examples/field-deploy/phase-k-rehearsal-evidence-digest.md) when the source
+rehearsal packet is already recorded and the next decision needs a sanitized evidence index rather than raw logs.
+
+The digest schema is `pr-shepherd-rehearsal-evidence-digest/v1` and records source evidence links, expected/current
+head and base refs, dry-run command summary, focused-check verdicts, gate outcomes, evidence hygiene, and exactly one
+next-lane recommendation: Phase D decision packet candidate, rerun Phase G/H, rerun Phase I, rerun Phase J, continue
+observation, or Block. It is always `dryRunEvidenceOnly=true`, `productionMutation=false`, `pushAllowed=false`,
+`mutatesBranch=false`, and `noLiveApproval=true`.
+
+Phase K preserves the same ledger and contamination boundaries as earlier phases: post `Start` before reading or
+publishing digest evidence, close with exactly one of `PR: <url>`, `Done`, or `Block`, report `startCommentUrl` plus the
+matching terminal URL when available, and fail closed if branch or artifact evidence would include `AGENTS.md`,
+`SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`. It never approves live `repair`,
+creates timers, pushes, or carries approval into Phase D/E.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local

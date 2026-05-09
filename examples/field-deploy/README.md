@@ -40,6 +40,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   a non-mutating operator packet without treating review approval as live repair approval.
 - `phase-j-supervised-rehearsal-queue.md` — Phase J runbook for supervising a one-at-a-time dry-run rehearsal
   queue and packet without live repair approval, timers, branch mutation, or pushes.
+- `phase-k-rehearsal-evidence-digest.md` — Phase K runbook for converting completed dry-run rehearsal evidence into
+  a sanitized operator digest without live repair approval, branch mutation, timers, or pushes.
 
 ## Safe install sketch
 
@@ -228,6 +230,18 @@ with exactly one of `PR: <url>`, `Done`, or `Block`, returns `startCommentUrl` p
 available, and blocks before PR/evidence publication on stale feedback, `CHANGES_REQUESTED`, non-dirty PR state, ref
 drift, live repair commands, or OpenClaw runtime/bootstrap context evidence. Phase J never runs live `repair`, creates
 standing timers, pushes, or carries approval into Phase D/E.
+
+## Phase K rehearsal evidence digest
+
+Use `phase-k-rehearsal-evidence-digest.md` after Phase C/J dry-run rehearsal evidence exists and the operator needs a
+compact decision digest. Phase K writes a `pr-shepherd-rehearsal-evidence-digest/v1` packet with source evidence links,
+expected/current refs, dry-run command summary, focused-check verdicts, an evidence index, contamination guard result,
+and one next-lane recommendation: Phase D decision packet candidate, rerun Phase G/H, rerun Phase I, rerun Phase J,
+continue observation, or Block. It starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or `Block`,
+returns `startCommentUrl` plus the matching terminal URL when available, and blocks before PR/evidence publication on
+stale refs, live repair commands, raw transcripts, secrets/private paths, or OpenClaw runtime/bootstrap context
+evidence. Phase K summarizes dry-run evidence only; it never approves live `repair`, creates timers, pushes, or carries
+approval into Phase D/E.
 
 ## Field doctor
 
