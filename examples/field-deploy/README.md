@@ -49,6 +49,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   repository repair with strict scope, verification, closeout markers, and runtime/bootstrap contamination guards.
 - `phase-n-minor-auto-execution-controller.md` — Phase N runbook for operating the built-in
   `minor-auto-safe-repair` execution controller with final changed-path, resolver, push, and evidence gates.
+- `phase-o-minor-auto-production-rollout-controls.md` — Phase O runbook for default-off minor-auto rollout modes,
+  budgets, cooldowns, circuit breakers, post-push observation, rollback guidance, and dashboard summaries.
 
 ## Safe install sketch
 
@@ -285,6 +287,15 @@ contamination guard, verifies the expected remote head, and pushes only through 
 `Done` or `Block` and returns `startCommentUrl` plus the matching terminal URL when available. Phase N does not permit
 multi-target mutation, failed/pending-check repair, allowlist widening during execution, broad live repair, or retries
 after drift without a fresh Start marker and fresh gates.
+
+## Phase O minor-auto production rollout controls
+
+Use `phase-o-minor-auto-production-rollout-controls.md` before enabling any target beyond default `observe-only`.
+Phase O defines `observe-only`, `sandbox-proof`, `minor-auto-dry-run`, and `minor-auto-live-limited` modes; live-limited
+requires explicit target/path/resolver policy, branch allowlist, push budget, cooldown/circuit-breaker checks,
+post-push observation, and rollback guidance. It preserves hard safety boundaries: no auto-merge, no fix-until-green
+loop, no broad `--all` live mutation, no risky auto-push, no provider sends, no Gateway restart, and no raw
+runtime/bootstrap evidence. Major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
 ## Field doctor
 

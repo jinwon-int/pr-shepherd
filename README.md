@@ -409,6 +409,18 @@ allowlist/risk/evidence contamination failure, verifies the expected remote head
 evidence. It does not permit multi-target mutation, failed or pending CI repair, allowlist widening during execution,
 broad live repair, or retries after drift without a fresh Start marker and fresh gates.
 
+### Phase O minor-auto production rollout controls
+
+Phase O adds the default-off rollout layer for the Phase N controller. Use
+[`phase-o-minor-auto-production-rollout-controls.md`](examples/field-deploy/phase-o-minor-auto-production-rollout-controls.md)
+before moving any target from `observe-only` to `sandbox-proof`, `minor-auto-dry-run`, or
+`minor-auto-live-limited`. Live-limited rollout requires explicit target/path/resolver policy, a branch allowlist,
+ownership guard, push budget, cooldown/circuit-breaker checks, clean evidence hygiene, post-push CI observation,
+rollback/revert guidance on failed or unstable outcomes, and dashboard summaries for candidates, auto-repaired,
+blocked-needs-approval, stale-refresh-required, circuit-breaker-open, and post-push states. No auto-merge,
+fix-until-green loop, broad `--all` live mutation, risky auto-push, provider send, Gateway restart, or raw
+runtime/bootstrap evidence is allowed; major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local

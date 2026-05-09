@@ -29,6 +29,7 @@ const packageFiles = {
   phaseJSupervisedRehearsalQueue: resolve(here, 'phase-j-supervised-rehearsal-queue.md'),
   phaseKRehearsalEvidenceDigest: resolve(here, 'phase-k-rehearsal-evidence-digest.md'),
   phaseMBoundedAutoSafeMinorRepair: resolve(here, 'phase-m-bounded-auto-safe-minor-repair.md'),
+  phaseOMinorAutoRolloutControls: resolve(here, 'phase-o-minor-auto-production-rollout-controls.md'),
 };
 
 function usage(exitCode = 1) {
@@ -283,6 +284,20 @@ function packageDoctor() {
     check(/startCommentUrl/.test(phaseMBoundedAutoSafeMinorRepair) && /prUrl/.test(phaseMBoundedAutoSafeMinorRepair) && /doneCommentUrl/.test(phaseMBoundedAutoSafeMinorRepair) && /blockCommentUrl/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must require returned marker URLs');
     check(/AGENTS\.md/.test(phaseMBoundedAutoSafeMinorRepair) && /\.openclaw\/\*\*/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must include the runtime/bootstrap contamination guard');
     checks.push({ name: 'phase-m-bounded-auto-safe-minor-repair', ok: true, path: relativeToRepo(packageFiles.phaseMBoundedAutoSafeMinorRepair) });
+  }
+
+  const phaseOMinorAutoRolloutControls = readText(packageFiles.phaseOMinorAutoRolloutControls, errors);
+  if (phaseOMinorAutoRolloutControls) {
+    check(/minor-auto production rollout/i.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must name minor-auto production rollout controls');
+    check(/observe-only/.test(phaseOMinorAutoRolloutControls) && /sandbox-proof/.test(phaseOMinorAutoRolloutControls) && /minor-auto-dry-run/.test(phaseOMinorAutoRolloutControls) && /minor-auto-live-limited/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must document all rollout modes');
+    check(/default-off|Missing mode is treated as `observe-only`/i.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must preserve default-off observe-only posture');
+    check(/circuit breaker/i.test(phaseOMinorAutoRolloutControls) && /cooldown/i.test(phaseOMinorAutoRolloutControls) && /post-push observation/i.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must document circuit breaker, cooldown, and post-push observation');
+    check(/rollback guidance|revert/i.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must document rollback/revert guidance');
+    check(/No auto-merge/.test(phaseOMinorAutoRolloutControls) && /no fix-until-green loop/.test(phaseOMinorAutoRolloutControls) && /no broad `--all` live mutation/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must document hard safety boundaries');
+    check(/Seo Jin On approval/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must route risky changes to Seo Jin On approval');
+    check(/`Start`/.test(phaseOMinorAutoRolloutControls) && /`Done`/.test(phaseOMinorAutoRolloutControls) && /`Block`/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must preserve Start and terminal ledger markers');
+    check(/AGENTS\.md/.test(phaseOMinorAutoRolloutControls) && /\.openclaw\/\*\*/.test(phaseOMinorAutoRolloutControls), errors, 'Phase O runbook must include runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-o-minor-auto-production-rollout-controls', ok: true, path: relativeToRepo(packageFiles.phaseOMinorAutoRolloutControls) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);
