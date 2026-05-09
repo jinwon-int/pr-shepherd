@@ -14,6 +14,7 @@ import {
   buildConflictDiagnosisBundle,
   buildLiveRepairExecutionHarness,
   buildPhaseDCandidateGate,
+  buildPhaseDOperatorPacket,
   buildPostActionAuditEntry,
   buildRehearsalEvidenceDigest,
   buildRepairRehearsalApprovalPackage,
@@ -1236,6 +1237,70 @@ test('Phase K rehearsal digest records a fail-closed Phase D candidate gate', ()
   assert.equal(contaminated.candidateAllowed, false);
   assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['.openclaw/workspace-state.json']);
   assert.match(contaminated.blockedReasons.join('\n'), /runtime\/bootstrap context paths/);
+});
+
+
+test('Phase L assembles a sanitized Phase D operator packet and blocks contaminated evidence', () => {
+  const target = validationTarget({
+    pr: 'owner/repo#1',
+    url: 'https://github.com/owner/repo/pull/1',
+    privatePaths: ['/private/operator'],
+  });
+  const pr = { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const plan = planAutomaticAction(target, {}, pr, classification, { dryRun: true, now: Date.parse('2026-05-08T07:00:00Z') });
+  const approvalPackage = buildRepairRehearsalApprovalPackage(target, pr, {}, plan, {
+    now: new Date('2026-05-08T07:00:00Z'),
+    repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY',
+    baseOid: 'base123',
+    classification: 'dirty',
+  });
+  const state = {
+    lastRepairRehearsal: {
+      at: '2026-05-08T07:00:00.000Z',
+      target: 'target-1',
+      repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY',
+      headRefOid: 'abc123',
+      baseOid: 'base123',
+      approvalPackage,
+    },
+    actionLedger: [{ actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL, result: 'rehearsed', repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY' }],
+  };
+  state.lastRehearsalEvidenceDigest = buildRehearsalEvidenceDigest(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T07:05:00Z'),
+  });
+
+  const packet = buildPhaseDOperatorPacket(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T07:06:00Z'),
+    preparedBy: 'automation in /private/operator with token=ghp_123456789012345678901234',
+    phaseBSummary: 'observation clean; see /private/operator/state.json',
+  });
+
+  assert.equal(packet.schema, 'pr-shepherd-phase-d-operator-packet/v1');
+  assert.equal(packet.packetAllowed, true);
+  assert.equal(packet.status, 'ready-for-operator');
+  assert.equal(packet.noLiveApproval, true);
+  assert.equal(packet.pushAllowed, false);
+  assert.equal(packet.mutatesBranch, false);
+  assert.deepEqual(packet.liveCommandUnderConsideration, ['node', 'pr-shepherd.mjs', 'repair', '--config', '<config>', '--target', 'target-1']);
+  assert.equal(packet.expectedRefs.repairKey, 'repair:abc123:base123:CONFLICTING:DIRTY');
+  assert.equal(packet.approvalConfigTemplate.automaticActions.liveRepair.scope, 'auto-safe-repair');
+  assert.equal(packet.closeout.startMarker, 'Start');
+  assert.deepEqual(packet.closeout.returnFields, ['startCommentUrl', 'prUrl', 'doneCommentUrl', 'blockCommentUrl']);
+  assert.doesNotMatch(JSON.stringify(packet), /ghp_123456789012345678901234/);
+  assert.doesNotMatch(JSON.stringify(packet), /\/private\/operator/);
+
+  const contaminated = buildPhaseDOperatorPacket(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T07:06:00Z'),
+    artifactEvidencePaths: ['USER.md', '.openclaw/workspace-state.json'],
+  });
+  assert.equal(contaminated.packetAllowed, false);
+  assert.equal(contaminated.terminalLedgerMarker, 'Block');
+  assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['.openclaw/workspace-state.json', 'USER.md']);
+  assert.match(contaminated.blockedReasons.join('\n'), /USER\.md/);
 });
 
 test('rehearse is an approval-gated dry-run repair alias that stops before git mutation', () => {

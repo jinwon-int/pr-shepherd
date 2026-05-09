@@ -43,6 +43,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
 - `phase-k-rehearsal-evidence-digest.md` — Phase K runbook for converting completed dry-run rehearsal evidence into
   a sanitized evidence digest and fail-closed Phase D candidate gate without live repair approval, branch mutation,
   timers, or pushes.
+- `phase-l-phase-d-operator-packet-workflow.md` — Phase L runbook for preparing a sanitized Phase D operator
+  decision packet from an allowed Phase K candidate, without running live repair or editing approval config.
 
 ## Safe install sketch
 
@@ -245,6 +247,17 @@ approve live repair. It starts with `Start`, closes with exactly one of `PR: <ur
 mismatched evidence, missing rehearsal ledger, missing focused checks, live repair commands, raw transcripts,
 secrets/private paths, or OpenClaw runtime/bootstrap context evidence. Phase K summarizes dry-run evidence only; it
 never approves live `repair`, creates timers, pushes, or carries approval into Phase D/E.
+
+## Phase L Phase D operator packet workflow
+
+Use `phase-l-phase-d-operator-packet-workflow.md` after Phase K records `candidateAllowed=true` and before any
+operator supplies one-shot Phase D/E approval metadata. Phase L re-reads current PR refs and dirty classification,
+confirms the candidate gate, focused checks, exact live argv, allowed branch, push budget, rollback note, and abort
+criteria, then publishes a short Phase D packet for a human GO/NO-GO/Block decision. It starts with `Start`, closes
+with exactly one of `PR: <url>`, `Done`, or `Block`, returns `startCommentUrl` plus the matching terminal URL when
+available, and blocks before PR/evidence publication if runtime/bootstrap context paths would enter the branch or
+artifact evidence. Phase L does not run live `repair`, push, create timers, edit approval config, or treat Phase K
+candidacy as live repair approval.
 
 ## Field doctor
 

@@ -348,6 +348,27 @@ publishing digest evidence, close with exactly one of `PR: <url>`, `Done`, or `B
 matching terminal URL when available, and never approve live `repair`, create timers, push, or carry approval into
 Phase D/E.
 
+### Phase L Phase D operator packet assembler
+
+Phase L turns an allowed, fresh Phase K candidate into a sanitized `pr-shepherd-phase-d-operator-packet/v1` for a
+human GO/NO-GO/Block decision. Use
+[`phase-l-phase-d-operator-packet-workflow.md`](examples/field-deploy/phase-l-phase-d-operator-packet-workflow.md) or
+`node pr-shepherd.mjs phase-d-packet --config config.json --target <id>` after the Phase K digest records
+`candidateAllowed=true`, rehearsal evidence is in state, and before any operator records one-shot Phase D/E approval
+metadata. Phase L re-reads current PR refs and dirty classification, confirms the candidate gate, focused-check gate,
+repair key, exact live argv under consideration, allowed branch, push budget, rollback note, abort criteria, approval
+config template, closeout markers, and fail-closed gates, then publishes a short sanitized packet for review.
+
+It is approval preparation only: `productionMutation=false`, `pushAllowed=false`, `mutatesBranch=false`, and
+`noLiveApproval=true`; live `repair` is not run, pushes are not attempted, timers are not created, approval config is not
+edited on the operator's behalf, and Phase K candidacy is not treated as live repair approval. Phase L keeps the same
+ledger boundary as earlier phases: post `Start` before packet assembly, close with exactly one of `PR: <url>`, `Done`,
+or `Block`, and report `startCommentUrl` plus the matching terminal URL when available. Before posting a PR marker,
+attaching packet evidence, or letting a runner create a review PR, `--branch-diff-path` and `--artifact-evidence-path`
+inputs plus branch diff paths and planned artifact evidence are checked against the runtime/bootstrap denylist; fail
+closed on `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`, reporting
+only exact repo-relative offending paths.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
