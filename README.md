@@ -707,9 +707,9 @@ no-send-by-default wrapper that consumes `PR_SHEPHERD_MESSAGE` / `PR_SHEPHERD_*`
 a config `notify` fragment for full reports on every 10-minute check, Phase A standing-operations
 runbook with state/evidence rotation and 24-48h observation templates, Phase B observation/noise-control,
 Phase C rehearsal, Phase D operator decision, Phase E execution/audit, Phase F fleet-safe limited autonomy,
-Phase G diagnose-only context, Phase H repair-plan handoff, and Phase I review-state feedback runbooks, a final
-live-readiness GO/NO-GO package, and a reversible user-systemd canary install sketch. Keep the copied env file and
-Telegram routing/token files outside this repo.
+Phase G diagnose-only context, Phase H repair-plan handoff, Phase I review-state feedback, and Phase J supervised
+rehearsal queue runbooks, a final live-readiness GO/NO-GO package, and a reversible user-systemd canary install
+sketch. Keep the copied env file and Telegram routing/token files outside this repo.
 
 A systemd timer should use the CLI lock; overlapping timers fail closed.
 
