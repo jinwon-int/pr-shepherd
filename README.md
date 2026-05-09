@@ -348,6 +348,16 @@ publishing digest evidence, close with exactly one of `PR: <url>`, `Done`, or `B
 matching terminal URL when available, and never approve live `repair`, create timers, push, or carry approval into
 Phase D/E.
 
+### Phase L Phase D operator packet assembler
+
+Phase L turns a fresh Phase K digest into a sanitized `pr-shepherd-phase-d-operator-packet/v1` for the human GO/NO-GO
+record. Use `node pr-shepherd.mjs phase-d-packet --config config.json --target <id>` after rehearsal evidence is in
+state. The packet names the exact live command under consideration, expected refs, focused checks, push guard, approval
+config template, closeout markers, and fail-closed gates; it remains `noLiveApproval=true`, `pushAllowed=false`, and
+`productionMutation=false` until the operator records separate one-shot approval metadata. `--branch-diff-path` and
+`--artifact-evidence-path` inputs are checked against the OpenClaw runtime/bootstrap context denylist and close as
+`Block` with exact repo-relative offending paths.
+
 ## Sandbox repair proof harness
 
 Run `npm run proof:sandbox` before enabling any production live repair lane. The harness builds disposable local
