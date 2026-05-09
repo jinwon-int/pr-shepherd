@@ -24,6 +24,7 @@ export const MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS = 60 * 60 * 1000;
 export const AUTOMATIC_ACTION_CLASSES = Object.freeze({
   RECHECK: 'recheck',
   DIAGNOSE: 'diagnose',
+  DIAGNOSE_ONLY: 'diagnose-only',
   NOTIFY_ESCALATE: 'notify-escalate',
   REPAIR_REHEARSAL: 'repair-rehearsal',
   CONFLICT_ARTIFACT: 'conflict-artifact',
@@ -71,7 +72,7 @@ function assertNoOpenClawRuntimeContextPaths(paths, evidenceKind) {
 }
 
 function usage(exitCode = 1) {
-  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/repair/rehearse.`);
+  console.error(`Usage:\n  node pr-shepherd.mjs validate --config config.json\n  node pr-shepherd.mjs status --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs check-canary --config config.json [--target id|owner/repo#number] [--all]\n  node pr-shepherd.mjs diagnose --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path]\n  node pr-shepherd.mjs rehearse --config config.json [--target id|owner/repo#number] [--all] [--artifact-dir path] [--no-keep-failed-rebase-worktree]\n  node pr-shepherd.mjs repair --config config.json [--target id|owner/repo#number] [--all] [--dry-run] [--artifact-dir path] [--allow-code-assisted-push] [--no-keep-failed-rebase-worktree]\n\nFor backward compatibility, omitting both --target and --all processes only the first configured target for status/check/check-canary/diagnose/repair/rehearse.`);
   process.exit(exitCode);
 }
 
@@ -82,7 +83,7 @@ function requireValue(flag, value) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'repair', 'rehearse'].includes(cmd)) usage();
+  if (!cmd || !['validate', 'status', 'canary', 'check', 'check-canary', 'diagnose', 'repair', 'rehearse'].includes(cmd)) usage();
   const args = {
     cmd,
     dryRun: false,
@@ -243,6 +244,54 @@ function validateConflictPolicy(errors, target, targetPath) {
   }
 }
 
+export function isSafeDiagnosisHintCommand(command) {
+  const value = String(command || '').trim();
+  if (!value) return false;
+  if (/[\n\r;&|<>`$\\]/.test(value)) return false;
+  if (/\b(env|printenv|set|export|curl|wget|nc|scp|ssh|rsync)\b/i.test(value)) return false;
+  if (/\b(rm|mv|cp|chmod|chown|touch|tee)\b/i.test(value)) return false;
+  if (/\b(git\s+(push|checkout|switch|reset|rebase|merge|commit|clean|apply|am|cherry-pick))\b/i.test(value)) return false;
+  if (/\b(npm|pnpm|yarn)\s+(install|add|remove|publish|version)\b/i.test(value)) return false;
+  if (/\bgh\b.*\b(-X|--method)\s*(POST|PUT|PATCH|DELETE)\b/i.test(value)) return false;
+  if (/(^|\s)(\/(root|home|tmp|var|etc)\/|~\/)/.test(value)) return false;
+  return /^(npm|pnpm|yarn)\s+(test|run)\b/.test(value)
+    || /^node\s+(--check|--test)\b/.test(value)
+    || /^git\s+(diff\s+--check|grep\b|show\s+--stat\b|log\s+--oneline\b)/.test(value);
+}
+
+function normalizeDiagnosisHintEntry(entry) {
+  if (!isPlainObject(entry)) return null;
+  return {
+    path: typeof entry.path === 'string' ? entry.path.trim().replace(/\\/g, '/') : '',
+    summary: typeof entry.summary === 'string' ? entry.summary.trim() : '',
+    commands: Array.isArray(entry.commands) ? entry.commands.filter((item) => typeof item === 'string').map((item) => item.trim()).filter(Boolean) : [],
+  };
+}
+
+function validateDiagnosisHints(errors, target, targetPath) {
+  if (target.diagnosisHints === undefined) return;
+  if (!Array.isArray(target.diagnosisHints)) {
+    errors.push(`${targetPath}.diagnosisHints must be an array`);
+    return;
+  }
+  target.diagnosisHints.forEach((entry, index) => {
+    const entryPath = `${targetPath}.diagnosisHints[${index}]`;
+    const normalized = normalizeDiagnosisHintEntry(entry);
+    if (!normalized) {
+      errors.push(`${entryPath} must be an object`);
+      return;
+    }
+    validateConflictPolicyPath(errors, `${entryPath}.path`, normalized.path);
+    if (entry.summary !== undefined && typeof entry.summary !== 'string') errors.push(`${entryPath}.summary must be a string`);
+    if (entry.commands !== undefined && !Array.isArray(entry.commands)) errors.push(`${entryPath}.commands must be a string array`);
+    normalized.commands.forEach((command, commandIndex) => {
+      if (!isSafeDiagnosisHintCommand(command)) {
+        errors.push(`${entryPath}.commands[${commandIndex}] is not an allowed diagnose-only hint command`);
+      }
+    });
+  });
+}
+
 function validateLiveOpenClawActivation(errors, notify, targetPath) {
   const notifyPath = `${targetPath}.notify`;
   const cadenceMs = notify.situationReportEveryMs === undefined
@@ -399,6 +448,7 @@ export function validateConfigObject(cfg, configPath = null) {
 
     validatePositiveNumber(errors, target, targetPath, 'autoPushLimit24h');
     validateConflictPolicy(errors, target, targetPath);
+    validateDiagnosisHints(errors, target, targetPath);
     validateObservationConfig(errors, target, targetPath);
     validateAutomaticActions(errors, target, targetPath);
 
@@ -944,6 +994,22 @@ function ghPrView(target) {
   return JSON.parse(res.stdout);
 }
 
+function ghPrChangedFiles(target) {
+  const res = run('gh', ['api', `repos/${target.owner}/${target.repo}/pulls/${target.number}/files`, '--paginate'], { allowFailure: true });
+  if (res.status !== 0) return [];
+  try {
+    const parsed = JSON.parse(res.stdout);
+    return Array.isArray(parsed) ? parsed.flat() : [];
+  } catch {
+    try {
+      const pages = JSON.parse(`[${res.stdout.trim().replace(/]\s*\[/g, '],[')}]`);
+      return Array.isArray(pages) ? pages.flat() : [];
+    } catch {
+      return [];
+    }
+  }
+}
+
 function sleepMs(ms) {
   const duration = Number(ms);
   if (!Number.isFinite(duration) || duration <= 0) return;
@@ -1410,11 +1476,11 @@ export function planConflictAutomaticAction(conflictInfo, conflicts = []) {
       reasons: ['code-assisted conflicts produce evidence but do not push automatically'],
     });
   }
-  return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE, {
-    writesArtifact: conflicts.length > 0,
-    requiresOperatorApproval: true,
+  return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY, {
+    writesArtifact: true,
+    requiresOperatorApproval: false,
     conflicts: conflicts.slice().sort(),
-    reasons: ['human-only, unlisted, or unknown conflicts require manual review'],
+    reasons: ['human-only, unlisted, or unknown conflicts require diagnose-only bundle and manual review'],
   });
 }
 
@@ -1865,6 +1931,57 @@ function handleCheck(target, opts = {}) {
   return { target, state, pr, classification, summary };
 }
 
+function handleDiagnose(target, args = {}) {
+  const outcome = handleCheck(target, { print: false });
+  const state = { ...outcome.state };
+  const pr = outcome.pr || {};
+  const classification = outcome.classification || { kind: state.lastKind || 'unknown', checks: { failed: [], pending: [] } };
+  const changedFiles = outcome.pr ? ghPrChangedFiles(target) : [];
+  const conflicts = Array.isArray(state.lastConflictPaths) ? state.lastConflictPaths : [];
+  const conflictInfo = classifyConflictSet(conflicts, target);
+  const plan = buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY, {
+    target: target.id,
+    pr: target.pr,
+    classification: classification.kind,
+    writesArtifact: true,
+    requiresOperatorApproval: false,
+    conflicts: conflicts.slice().sort(),
+    reasons: ['diagnose-only command writes a sanitized bundle, never pushes, and does not edit the watched worktree'],
+  });
+  const now = new Date();
+  const bundle = buildConflictDiagnosisBundle(target, pr, classification, state, {
+    now,
+    changedFiles,
+    conflicts,
+    conflictInfo,
+    plan,
+    baseOid: currentBaseOid(state, pr),
+  });
+  const artifactPath = writeConflictDiagnosisBundle(target, bundle, args.artifactDir);
+  state.lastAutomaticActionPlan = plan;
+  state.lastAutomaticActionExecution = automaticActionExecution(plan, 'executed', { result: basename(artifactPath) });
+  state.lastConflictDiagnosisBundle = {
+    at: now.toISOString(),
+    artifact: basename(artifactPath),
+    conflictKey: bundle.expectedRefs.conflictKey,
+    classification: bundle.prState.classification,
+    conflictTier: bundle.conflictPolicy.tier,
+  };
+  state.lastActionSummary = `diagnose-only bundle written: ${basename(artifactPath)}`;
+  appendPlanLedgerEntry(state, target, plan, 'diagnosed', {
+    conflictKey: bundle.expectedRefs.conflictKey,
+    expectedHeadOid: bundle.expectedRefs.headRefOid,
+    expectedBaseOid: bundle.expectedRefs.baseRefOid,
+    rollbackNote: 'diagnosis only; no branch mutation and no watched worktree edits',
+    details: { artifact: basename(artifactPath), conflictTier: bundle.conflictPolicy.tier },
+    now,
+  });
+  saveJson(target.statePath, state);
+  const summary = { target: target.id, ok: true, kind: classification.kind, actionClass: plan.actionClass, artifact: artifactPath, bundle };
+  console.log(JSON.stringify(summary, null, 2));
+  return { target, state, pr, classification, summary };
+}
+
 function ensureWorktree(target) {
   if (!existsSync(target.worktreePath)) throw new Error(`worktreePath does not exist: ${target.worktreePath}`);
   const clean = runShell('git status --porcelain', target.worktreePath).stdout.trim();
@@ -1944,6 +2061,145 @@ export function classifyConflictSet(conflicts = [], target = {}) {
     pushBlocked: tier !== 'autoSafe',
     requiresApproval: tier === 'codeAssisted',
   };
+}
+
+function normalizedRepoPath(path) {
+  return String(path || '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+function summarizeChangedFiles(files = []) {
+  return files.map((file) => ({
+    path: normalizedRepoPath(file.filename || file.path || file.name),
+    status: file.status || null,
+    additions: Number.isFinite(Number(file.additions)) ? Number(file.additions) : null,
+    deletions: Number.isFinite(Number(file.deletions)) ? Number(file.deletions) : null,
+    changes: Number.isFinite(Number(file.changes)) ? Number(file.changes) : null,
+  })).filter((file) => file.path).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function matchDiagnosisHintPath(hintPath, repoPath) {
+  if (!hintPath || !repoPath) return false;
+  if (hintPath.endsWith('/**')) return repoPath === hintPath.slice(0, -3) || repoPath.startsWith(hintPath.slice(0, -2));
+  if (hintPath.includes('*')) {
+    const escaped = hintPath.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*');
+    return new RegExp(`^${escaped}$`).test(repoPath);
+  }
+  return repoPath === hintPath;
+}
+
+function matchingDiagnosisHints(target = {}, paths = []) {
+  const candidates = [...new Set(paths.map(normalizedRepoPath).filter(Boolean))];
+  const hints = Array.isArray(target.diagnosisHints) ? target.diagnosisHints.map(normalizeDiagnosisHintEntry).filter(Boolean) : [];
+  return hints
+    .filter((hint) => candidates.length === 0 || candidates.some((path) => matchDiagnosisHintPath(hint.path, path)))
+    .map((hint) => ({
+      path: hint.path,
+      summary: hint.summary || null,
+      commands: hint.commands.filter(isSafeDiagnosisHintCommand),
+    }));
+}
+
+function checkSummaryFromClassification(classification = {}) {
+  return {
+    failed: (classification.checks?.failed || []).map((check) => ({ name: check.name, conclusion: check.conclusion || null, detailsUrl: check.detailsUrl || null })),
+    pending: (classification.checks?.pending || []).map((check) => ({ name: check.name, status: check.status || null, detailsUrl: check.detailsUrl || null })),
+    ignored: (classification.checks?.ignored || []).map((check) => ({ name: check.name, conclusion: check.conclusion || null })),
+  };
+}
+
+export function buildConflictDiagnosisBundle(target = {}, pr = {}, classification = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const conflicts = [...new Set((fields.conflicts || state.lastConflictPaths || []).map(normalizedRepoPath).filter(Boolean))].sort();
+  const changedFiles = summarizeChangedFiles(fields.changedFiles || []);
+  const relevantPaths = [...new Set([...conflicts, ...changedFiles.map((file) => file.path)])].sort();
+  const conflictInfo = fields.conflictInfo || classifyConflictSet(conflicts, target);
+  const plan = fields.plan || buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY, {
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    classification: classification.kind || state.lastKind || 'unknown',
+    writesArtifact: true,
+    requiresOperatorApproval: false,
+    reasons: ['diagnose-only bundle records sanitized conflict context and never pushes'],
+    conflicts,
+  });
+  const conflictKey = fields.conflictKey || conflictSetKey(pr, fields.baseOid || state.lastSeenBaseOid, conflicts);
+  const artifactEvidencePaths = fields.artifactEvidencePaths || conflicts;
+  const offendingPaths = findOpenClawRuntimeContextPaths([...conflicts, ...changedFiles.map((file) => file.path), ...artifactEvidencePaths]);
+  const bundle = {
+    schema: 'pr-shepherd-conflict-diagnosis-bundle/v1',
+    createdAt: now.toISOString(),
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    url: target.url || pr?.url || null,
+    productionMutation: false,
+    diagnoseOnly: true,
+    pushAllowed: false,
+    mutatesBranch: false,
+    diagnosisAllowed: offendingPaths.length === 0,
+    blockedReasons: offendingPaths.length > 0
+      ? [`OpenClaw runtime/bootstrap context paths would enter diagnosis evidence: ${offendingPaths.join(', ')}`]
+      : [],
+    expectedRefs: {
+      headBranch: target.headBranch || pr.headRefName || null,
+      baseBranch: target.baseBranch || pr.baseRefName || null,
+      headRefOid: pr.headRefOid || state.lastSeenHeadOid || null,
+      baseRefOid: fields.baseOid || state.lastSeenBaseOid || pr.baseRefOid || null,
+      conflictKey,
+    },
+    prState: {
+      classification: classification.kind || state.lastKind || 'unknown',
+      mergeable: pr.mergeable || state.lastMergeable || null,
+      mergeStateStatus: pr.mergeStateStatus || state.lastMergeStateStatus || null,
+      checks: checkSummaryFromClassification(classification),
+    },
+    conflictPolicy: {
+      tier: conflictInfo.tier,
+      autoPushAllowed: false,
+      pushBlocked: true,
+      classifications: conflictInfo.entries.map((entry) => ({ path: entry.path, tier: entry.tier, reason: entry.reason })),
+    },
+    conflictPaths: conflicts,
+    changedFiles,
+    diagnosisHints: matchingDiagnosisHints(target, relevantPaths),
+    focusedCommandHints: (target.focusedChecks || []).filter((command) => typeof command === 'string').map((command) => redactLedgerValue(command, target)),
+    operatorNextActions: [
+      conflictInfo.tier === 'autoSafe' ? 'autoSafe candidate: run rehearsal first, then require one-shot approval before any push.' : null,
+      conflictInfo.tier === 'codeAssisted' ? 'codeAssisted conflict: use the bundle for manual review; do not push without explicit follow-up approval.' : null,
+      conflictInfo.tier === 'humanOnly' ? 'humanOnly/unlisted conflict: keep repair disabled and escalate to a human maintainer.' : null,
+      conflicts.length === 0 ? 'No concrete conflict paths recorded yet; run sandbox/rehearsal diagnosis before choosing a repair path.' : null,
+      (classification.kind === 'unknown' || classification.kind === 'failed') ? 'State is not safely repairable; recheck or review failed checks before any mutation.' : null,
+    ].filter(Boolean),
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+      offendingRuntimeContextPaths: offendingPaths,
+    },
+    actionPlan: explainAutomaticActionPlan(plan),
+    terminalLedgerMarker: offendingPaths.length > 0 ? 'Block' : 'Done',
+    sources: [
+      'github-pr-view',
+      changedFiles.length > 0 ? 'github-pr-files' : null,
+      conflicts.length > 0 ? 'state-or-sandbox-conflict-paths' : null,
+      Array.isArray(target.diagnosisHints) && target.diagnosisHints.length > 0 ? 'target-diagnosis-hints' : null,
+    ].filter(Boolean),
+  };
+  return redactLedgerValue(bundle, target);
+}
+
+function writeConflictDiagnosisBundle(target, bundle, artifactDirOverride) {
+  assertNoOpenClawRuntimeContextPaths([
+    ...(bundle.conflictPaths || []),
+    ...(bundle.changedFiles || []).map((file) => file.path),
+    ...(bundle.evidenceHygiene?.offendingRuntimeContextPaths || []),
+  ], 'diagnosis evidence');
+  const artifactDir = resolve(artifactDirOverride || target.artifactDir || `${dirname(target.statePath)}/artifacts`);
+  mkdirSync(artifactDir, { recursive: true });
+  const safeId = String(target.id || 'target').replace(/[^A-Za-z0-9_.-]+/g, '-');
+  const artifactPath = `${artifactDir}/${safeId}-conflict-diagnosis.json`;
+  saveJson(artifactPath, bundle);
+  return artifactPath;
 }
 
 export function conflictSetKey(pr, baseOid, conflicts = []) {
@@ -2293,13 +2549,23 @@ function handleRepair(target, dryRun, opts = {}) {
       if (canResolveAutomatically) {
         run('git', ['-c', 'core.editor=true', 'rebase', '--continue'], { cwd: target.worktreePath });
       } else {
+        const diagnosisBundle = () => buildConflictDiagnosisBundle(target, { ...pr, baseRefOid: baseOid }, classification, state, {
+          conflicts,
+          conflictInfo,
+          conflictKey,
+          baseOid,
+        });
         const artifactExecution = executeAutomaticActionPlan(conflictPlan, {
           [AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT]: () => writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir),
-          [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: () => writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir),
+          [AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY]: () => writeConflictDiagnosisBundle(target, diagnosisBundle(), opts.artifactDir),
+          [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: () => writeConflictDiagnosisBundle(target, diagnosisBundle(), opts.artifactDir),
         });
         let artifactPath = artifactExecution.result;
         if (!artifactPath) {
-          artifactPath = writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir);
+          const fallbackBundle = diagnosisBundle();
+          artifactPath = conflictPlan.actionClass === AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT
+            ? writeConflictArtifact(target, pr, conflictInfo, conflicts, conflictKey, opts.artifactDir)
+            : writeConflictDiagnosisBundle(target, fallbackBundle, opts.artifactDir);
           state.lastAutomaticActionExecution = automaticActionExecution(conflictPlan, 'skipped', { result: artifactPath });
         } else {
           state.lastAutomaticActionExecution = artifactExecution;
@@ -2385,6 +2651,7 @@ function handleRepair(target, dryRun, opts = {}) {
 
 function handleTargetCommand(target, args, opts = {}) {
   if (args.cmd === 'check' || args.cmd === 'check-canary') return handleCheck(target, { print: opts.printCheckSummary });
+  if (args.cmd === 'diagnose') return handleDiagnose(target, args);
   return handleRepair(target, args.dryRun, args);
 }
 

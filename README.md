@@ -13,6 +13,7 @@ node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs check --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json --all
 node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
+node pr-shepherd.mjs diagnose --config config.json --target openclaw-78261 --artifact-dir ./artifacts
 node pr-shepherd.mjs rehearse --config config.json --target openclaw-78261
 node pr-shepherd.mjs repair --config config.json --dry-run
 node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-run
@@ -61,6 +62,8 @@ Automatic scheduler lanes:
 
 Commands that require operator approval:
 
+- `diagnose`: allowed for non-mutating conflict analysis; it refreshes PR state, writes a sanitized conflict diagnosis
+  bundle, and must not edit the watched worktree or push.
 - `rehearse` and `repair --dry-run`: allowed after an operator asks for investigation; they may prepare repair
   evidence but must not push.
 - live `repair`: allowed only after the operator names the target PR, confirms write credentials and worktree
@@ -159,6 +162,8 @@ Treat the action-class executor as a narrow dispatch layer from a recorded plan 
    post the terminal `Block` ledger marker when this is an operator-run task.
 3. Dispatch only to the handler registered for the exact action class:
    - `recheck`: refresh state or retry ambiguous GitHub data; no branch or artifact mutation.
+   - `diagnose`: collect source-backed PR metadata, check summaries, conflict paths, focused command hints, and
+     sanitized sandbox context for operator review; no watched-worktree edits, provider sends, or pushes.
    - `notify-escalate`: send the deduplicated operator notification only.
    - `repair-rehearsal`: collect dry-run repair evidence and update rehearsal state; do not push.
    - `conflict-artifact`: write sanitized conflict evidence for operator review; do not push.
@@ -213,6 +218,42 @@ record for one target and exact argv, strict verification, contamination guard, 
 `repair --all`, unattended force-pushes, or automatic expansion from one target to a fleet. `gh pr view --json` fetch
 fields intentionally exclude unsupported fields such as `baseRefOid`; base OIDs stay internal state/evidence values
 only.
+
+### Phase G diagnose-only conflict bundles
+
+Phase G strengthens diagnosis before repair. Use
+[`phase-g-diagnose-only-conflict-context.md`](examples/field-deploy/phase-g-diagnose-only-conflict-context.md) or the
+`diagnose` lane when an operator or worker needs more context before deciding between `autoSafe`, `codeAssisted`,
+`humanOnly`, no-op, or wait/recheck. `diagnose` runs the same read-only PR check path, fetches read-only
+changed-file summaries, and writes `<target>-conflict-diagnosis.json` under the configured artifact dir.
+
+A Phase G bundle should identify target/PR metadata and refs, summarize head/base evidence and mergeability/check
+state, include known conflict paths from state or sandbox evidence, classify paths against policy, include relevant
+changed-file summaries, attach only trimmed sandbox conflict context when needed, list focused command hints, record
+evidence hygiene, and recommend wait/recheck, no-op, autoSafe rehearsal, code-assisted review, humanOnly handoff, or
+block. It never pushes and does not edit the watched worktree.
+
+The diagnose-only lane is non-mutating. It may write sanitized operator summaries or artifacts and may inspect a
+disposable sandbox/rehearsal worktree, but it must not push, edit the watched worktree, send live provider messages,
+read secrets, or carry approval forward into live repair. Re-run the contamination guard before posting PRs or
+attaching artifacts.
+
+Targets may provide diagnosis-only hints for repo-owned paths:
+
+```json
+"diagnosisHints": [
+  {
+    "path": "extensions/telegram/src/**",
+    "summary": "Review outbound receipt and adapter mapping before choosing a resolver.",
+    "commands": ["pnpm test extensions/telegram/src/outbound-adapter.test.ts"]
+  }
+]
+```
+
+Hint commands are suggestions only. Validation accepts path-specific notes and argv-array focused checks with a narrow
+read-only allowlist (`npm/pnpm/yarn test|run`, `node --check|--test`, and safe `git diff --check`/`git grep`/`git show
+--stat`/`git log --oneline`). It fails closed for shell metacharacters, mutation commands, network/write tools,
+token/env reads, private absolute paths, broad globs, or OpenClaw runtime/bootstrap context evidence.
 
 ## Sandbox repair proof harness
 

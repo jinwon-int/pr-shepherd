@@ -23,6 +23,7 @@ const packageFiles = {
   phaseAStandingOps: resolve(here, 'phase-a-standing-ops.md'),
   phaseDOperatorDecisionPacket: resolve(here, 'phase-d-operator-decision-packet.md'),
   phaseFControlsPolicy: resolve(here, 'phase-f-fleet-safe-controls-limited-autonomy.md'),
+  phaseGDiagnoseOnly: resolve(here, 'phase-g-diagnose-only-conflict-context.md'),
 };
 
 function usage(exitCode = 1) {
@@ -192,6 +193,19 @@ function packageDoctor() {
     check(/AGENTS\.md/.test(phaseFControlsPolicy) && /\.openclaw\/\*\*/.test(phaseFControlsPolicy), errors, 'Phase F policy must include the runtime/bootstrap contamination guard');
     check(/`Start`/.test(phaseFControlsPolicy) && /`PR: <url>`/.test(phaseFControlsPolicy) && /`Done`/.test(phaseFControlsPolicy) && /`Block`/.test(phaseFControlsPolicy), errors, 'Phase F policy must preserve Start and terminal ledger markers');
     checks.push({ name: 'phase-f-fleet-safe-controls-limited-autonomy', ok: true, path: relativeToRepo(packageFiles.phaseFControlsPolicy) });
+  }
+
+  const phaseGDiagnoseOnly = readText(packageFiles.phaseGDiagnoseOnly, errors);
+  if (phaseGDiagnoseOnly) {
+    check(/diagnose-only/i.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must name diagnose-only operations');
+    check(/conflict context bundle/i.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must document conflict context bundles');
+    check(/disposable .*sandbox|sandbox\/rehearsal worktree/i.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must keep conflict context collection sandbox-only');
+    check(/baseRefOid/.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must preserve the unsupported GitHub field guard');
+    check(/diagnosisHints/i.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must document optional per-repo diagnosis hints');
+    check(/shell metacharacters/i.test(phaseGDiagnoseOnly) && /token\/env var reads/i.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must fail closed for unsafe commands and secret reads');
+    check(/AGENTS\.md/.test(phaseGDiagnoseOnly) && /\.openclaw\/\*\*/.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must include the runtime/bootstrap contamination guard');
+    check(/`Start`/.test(phaseGDiagnoseOnly) && /`PR: <url>`/.test(phaseGDiagnoseOnly) && /`Done`/.test(phaseGDiagnoseOnly) && /`Block`/.test(phaseGDiagnoseOnly), errors, 'Phase G runbook must preserve Start and terminal ledger markers');
+    checks.push({ name: 'phase-g-diagnose-only-conflict-context', ok: true, path: relativeToRepo(packageFiles.phaseGDiagnoseOnly) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);

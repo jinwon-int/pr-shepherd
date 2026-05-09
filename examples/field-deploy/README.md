@@ -32,6 +32,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   operator-approved live repair.
 - `phase-f-fleet-safe-controls-limited-autonomy.md` — Phase F policy for fleet-safe controls, limited autonomy
   tiers, expansion/rollback rules, and the standing prohibition on live repair automation.
+- `phase-g-diagnose-only-conflict-context.md` — Phase G runbook for diagnose-only operations, conflict context
+  bundles, sandbox-only evidence collection, and safe per-repo diagnosis hints.
 
 ## Safe install sketch
 
@@ -179,6 +181,15 @@ shared policy. Phase F defines autonomy tiers from F0 observe-only through F3 on
 prohibited for standing live repair timers, aggregate live `repair --all`, unattended force-pushes, and automatic
 fleet expansion. Promote one target or one tier at a time, keep default live push budget at zero, and re-run the
 runtime/bootstrap contamination guard before evidence or PR closeout.
+
+## Phase G diagnose-only conflict context
+
+Use `phase-g-diagnose-only-conflict-context.md` when dirty, conflicting, failed, or unknown targets need more context
+before an operator chooses recheck, no-op, autoSafe rehearsal, code-assisted review, humanOnly handoff, or block.
+Phase G is non-mutating: it may collect source-backed PR metadata, check summaries, conflict paths, focused command
+hints, and trimmed sandbox conflict context, but it must not push, edit the watched worktree, send live provider
+messages, or carry repair approval forward. Optional per-repo diagnosis hints are guidance only and fail closed for
+unsafe commands, private paths, token/env reads, network writes, mutation, or runtime/bootstrap context evidence.
 
 ## Field doctor
 
