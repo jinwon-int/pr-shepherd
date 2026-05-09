@@ -159,6 +159,8 @@ Treat the action-class executor as a narrow dispatch layer from a recorded plan 
    post the terminal `Block` ledger marker when this is an operator-run task.
 3. Dispatch only to the handler registered for the exact action class:
    - `recheck`: refresh state or retry ambiguous GitHub data; no branch or artifact mutation.
+   - `diagnose`: collect source-backed PR metadata, check summaries, conflict paths, focused command hints, and
+     sanitized sandbox context for operator review; no watched-worktree edits, provider sends, or pushes.
    - `notify-escalate`: send the deduplicated operator notification only.
    - `repair-rehearsal`: collect dry-run repair evidence and update rehearsal state; do not push.
    - `conflict-artifact`: write sanitized conflict evidence for operator review; do not push.
@@ -213,6 +215,23 @@ record for one target and exact argv, strict verification, contamination guard, 
 `repair --all`, unattended force-pushes, or automatic expansion from one target to a fleet. `gh pr view --json` fetch
 fields intentionally exclude unsupported fields such as `baseRefOid`; base OIDs stay internal state/evidence values
 only.
+
+### Phase G diagnose-only conflict context
+
+Phase G strengthens diagnosis before repair. Use
+[`phase-g-diagnose-only-conflict-context.md`](examples/field-deploy/phase-g-diagnose-only-conflict-context.md) when a
+dirty, conflicting, failed, or unknown target needs more context than `check`/`status` can provide. A Phase G bundle
+should identify the target and refs, summarize mergeability/check state, classify conflict paths against policy,
+include relevant changed-file summaries, attach only trimmed sandbox conflict context when needed, list focused
+command hints, and recommend wait/recheck, no-op, autoSafe rehearsal, code-assisted review, humanOnly handoff, or
+block.
+
+The diagnose-only lane is non-mutating. It may write sanitized operator summaries or artifacts and may inspect a
+disposable sandbox/rehearsal worktree, but it must not push, edit the watched worktree, send live provider messages,
+read secrets, or carry approval forward into live repair. Optional per-repo diagnosis hints are guidance only: allow
+path-specific notes and argv-array focused checks, and fail closed for unsafe shell features, private paths, token or
+environment reads, network writes, mutation, broad globs, or runtime/bootstrap context evidence. Re-run the
+contamination guard before posting `PR` or attaching artifacts.
 
 ## Sandbox repair proof harness
 
