@@ -28,6 +28,7 @@ const packageFiles = {
   phaseIReviewStateFeedback: resolve(here, 'phase-i-review-state-feedback.md'),
   phaseJSupervisedRehearsalQueue: resolve(here, 'phase-j-supervised-rehearsal-queue.md'),
   phaseKRehearsalEvidenceDigest: resolve(here, 'phase-k-rehearsal-evidence-digest.md'),
+  phaseMBoundedAutoSafeMinorRepair: resolve(here, 'phase-m-bounded-auto-safe-minor-repair.md'),
 };
 
 function usage(exitCode = 1) {
@@ -268,6 +269,20 @@ function packageDoctor() {
     check(/startCommentUrl/.test(phaseKRehearsalEvidenceDigest) && /prUrl/.test(phaseKRehearsalEvidenceDigest) && /doneCommentUrl/.test(phaseKRehearsalEvidenceDigest) && /blockCommentUrl/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must require returned marker URLs');
     check(/AGENTS\.md/.test(phaseKRehearsalEvidenceDigest) && /\.openclaw\/\*\*/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must include the runtime/bootstrap contamination guard');
     checks.push({ name: 'phase-k-rehearsal-evidence-digest', ok: true, path: relativeToRepo(packageFiles.phaseKRehearsalEvidenceDigest) });
+  }
+
+  const phaseMBoundedAutoSafeMinorRepair = readText(packageFiles.phaseMBoundedAutoSafeMinorRepair, errors);
+  if (phaseMBoundedAutoSafeMinorRepair) {
+    check(/bounded auto-safe minor repair/i.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must name bounded auto-safe minor repair operations');
+    check(/autoSafeMinor=true/.test(phaseMBoundedAutoSafeMinorRepair) && /productionMutation=false/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must keep minor repairs non-production-mutating');
+    check(/liveRepair=false/.test(phaseMBoundedAutoSafeMinorRepair) && /pushAllowed=false/.test(phaseMBoundedAutoSafeMinorRepair) && /timers=false/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must block live repair, direct push approval, and timers');
+    check(/allowed path set|path allowlist/i.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must require an explicit path scope');
+    check(/diff budget/i.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must require a bounded diff budget');
+    check(/verification commands|Verification:/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must require verification evidence');
+    check(/`Start`/.test(phaseMBoundedAutoSafeMinorRepair) && /`PR: <url>`/.test(phaseMBoundedAutoSafeMinorRepair) && /`Done`/.test(phaseMBoundedAutoSafeMinorRepair) && /`Block`/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must preserve Start and terminal ledger markers');
+    check(/startCommentUrl/.test(phaseMBoundedAutoSafeMinorRepair) && /prUrl/.test(phaseMBoundedAutoSafeMinorRepair) && /doneCommentUrl/.test(phaseMBoundedAutoSafeMinorRepair) && /blockCommentUrl/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must require returned marker URLs');
+    check(/AGENTS\.md/.test(phaseMBoundedAutoSafeMinorRepair) && /\.openclaw\/\*\*/.test(phaseMBoundedAutoSafeMinorRepair), errors, 'Phase M runbook must include the runtime/bootstrap contamination guard');
+    checks.push({ name: 'phase-m-bounded-auto-safe-minor-repair', ok: true, path: relativeToRepo(packageFiles.phaseMBoundedAutoSafeMinorRepair) });
   }
 
   const packagePaths = Object.values(packageFiles).map(relativeToRepo);
