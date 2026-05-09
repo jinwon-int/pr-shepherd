@@ -409,19 +409,26 @@ allowlist/risk/evidence contamination failure, verifies the expected remote head
 evidence. It does not permit multi-target mutation, failed or pending CI repair, allowlist widening during execution,
 broad live repair, or retries after drift without a fresh Start marker and fresh gates.
 
-### Phase O minor-auto rollout operations
+### Phase O minor-auto production rollout controls
 
-Phase O governs staged rollout of `automaticActions.minorAutoRepair` after the Phase N controller path is understood.
-Use [`phase-o-minor-auto-rollout-operations.md`](examples/field-deploy/phase-o-minor-auto-rollout-operations.md) to
-move one target by one tier at a time through shadow, dry-run, single-target live, limited expansion, pause, or
-rollback. The rollout packet records source-backed Phase N evidence, exact policy shape, focused verification, push
-budget, rollback owner/triggers, branch diff paths, planned evidence paths, and the runtime/bootstrap contamination
-guard result.
+Phase O adds the default-off rollout layer for the Phase N controller. Use
+[`phase-o-minor-auto-production-rollout-controls.md`](examples/field-deploy/phase-o-minor-auto-production-rollout-controls.md)
+for rollout mode policy and post-push controls, and
+[`phase-o-minor-auto-rollout-operations.md`](examples/field-deploy/phase-o-minor-auto-rollout-operations.md) for the
+operator ledger/runbook sequence. Move one target by one tier at a time through `observe-only`, `sandbox-proof`,
+`minor-auto-dry-run`, `minor-auto-live-limited`, pause, or rollback. The rollout packet records source-backed Phase N
+evidence, exact policy shape, focused verification, push budget/cooldown, rollback owner/triggers, branch diff paths,
+planned evidence paths, and the runtime/bootstrap contamination guard result.
 
-Phase O starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or `Block`, and reports
-`startCommentUrl` plus the matching terminal URL when available. A successful rollout step does not approve broad
-minor-auto repair, multi-target mutation, allowlist widening during execution, or any future branch push; every live
-repair still needs a fresh Phase N controller run and final gates.
+Live-limited rollout requires explicit target/path/resolver policy, a branch allowlist, ownership guard, push budget,
+cooldown/circuit-breaker checks, clean evidence hygiene, post-push CI observation, rollback/revert guidance on failed
+or unstable outcomes, and dashboard summaries for candidates, auto-repaired, blocked-needs-approval,
+stale-refresh-required, circuit-breaker-open, and post-push states. Phase O starts with `Start`, closes with exactly one
+of `PR: <url>`, `Done`, or `Block`, and reports `startCommentUrl` plus the matching terminal URL when available. A
+successful rollout step does not approve broad minor-auto repair, multi-target mutation, allowlist widening during
+execution, auto-merge, fix-until-green loops, provider sends, Gateway restarts, raw runtime/bootstrap evidence, or any
+future branch push; every live repair still needs a fresh Phase N controller run and final gates, and
+major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
 
 ## Sandbox repair proof harness
 

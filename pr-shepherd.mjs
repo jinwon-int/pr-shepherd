@@ -22,6 +22,13 @@ export const DEFAULT_SITUATION_REPORT_EVERY_MS = 6 * 60 * 60 * 1000;
 export const MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS = 60 * 60 * 1000;
 export const MINOR_AUTO_SAFE_REPAIR_SCOPE = 'minor-auto-safe-repair';
 export const SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS = Object.freeze(['merge-changelog-top-entry']);
+export const MINOR_AUTO_ROLLOUT_MODES = Object.freeze([
+  'observe-only',
+  'sandbox-proof',
+  'minor-auto-dry-run',
+  'minor-auto-live-limited',
+]);
+export const DEFAULT_MINOR_AUTO_POST_PUSH_OBSERVATION_WINDOW_MS = 60 * 60 * 1000;
 
 export const AUTOMATIC_ACTION_CLASSES = Object.freeze({
   RECHECK: 'recheck',
@@ -459,6 +466,51 @@ function minorAutoRepairPolicy(target = {}) {
   return target.automaticActions?.minorAutoRepair || {};
 }
 
+function minorAutoRolloutMode(policy = {}) {
+  return MINOR_AUTO_ROLLOUT_MODES.includes(policy.rolloutMode) ? policy.rolloutMode : 'observe-only';
+}
+
+function minorAutoCircuitBreaker(state = {}) {
+  const breaker = state.minorAutoCircuitBreaker || state.minorAutoRollout?.circuitBreaker || null;
+  if (!isPlainObject(breaker)) return { state: 'closed', reason: null, openedAt: null };
+  const breakerState = breaker.state === 'open' ? 'open' : 'closed';
+  return {
+    state: breakerState,
+    reason: typeof breaker.reason === 'string' && breaker.reason.trim() ? breaker.reason.trim() : null,
+    openedAt: typeof breaker.openedAt === 'string' ? breaker.openedAt : null,
+    closedAt: typeof breaker.closedAt === 'string' ? breaker.closedAt : null,
+  };
+}
+
+function lastMinorAutoPushAt(state = {}) {
+  const pushes = (state.autoPushes || [])
+    .filter((push) => push?.reason === MINOR_AUTO_SAFE_REPAIR_SCOPE || push?.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE)
+    .map((push) => Date.parse(push.at || ''))
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a);
+  return pushes[0] || null;
+}
+
+function recentRepoMinorAutoPushes(state = {}, target = {}, now = Date.now()) {
+  const repoKey = target.owner && target.repo ? `${target.owner}/${target.repo}` : null;
+  return (state.autoPushes || []).filter((push) => {
+    const at = Date.parse(push?.at || '');
+    if (!Number.isFinite(at) || now - at >= 24 * 60 * 60 * 1000) return false;
+    if (!(push?.reason === MINOR_AUTO_SAFE_REPAIR_SCOPE || push?.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE)) return false;
+    if (!repoKey || !push.repo) return true;
+    return push.repo === repoKey;
+  });
+}
+
+function minorAutoPostPushStopReason(state = {}) {
+  const observation = state.lastMinorAutoPostPushObservation;
+  if (!isPlainObject(observation)) return null;
+  if (observation.rolloutStopRequired === true) {
+    return observation.operatorSummary || `post-push outcome ${observation.outcome || 'unknown'} requires operator review`;
+  }
+  return null;
+}
+
 function configuredMinorAutoPaths(policy = {}) {
   return (Array.isArray(policy.pathAllowlist) ? policy.pathAllowlist : (Array.isArray(policy.paths) ? policy.paths : []))
     .map((item) => normalizedRepoPath(item))
@@ -499,21 +551,29 @@ function validateMinorAutoRepair(errors, target, targetPath) {
     return;
   }
   if (policy.enabled !== undefined && typeof policy.enabled !== 'boolean') errors.push(`${policyPath}.enabled must be a boolean`);
+  if (policy.rolloutMode !== undefined && !MINOR_AUTO_ROLLOUT_MODES.includes(policy.rolloutMode)) errors.push(`${policyPath}.rolloutMode must be one of: ${MINOR_AUTO_ROLLOUT_MODES.join(', ')}`);
   if (policy.scope !== undefined && policy.scope !== MINOR_AUTO_SAFE_REPAIR_SCOPE) errors.push(`${policyPath}.scope must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE}`);
   if (policy.actionClass !== undefined && policy.actionClass !== AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR) errors.push(`${policyPath}.actionClass must be auto-safe-repair`);
   if (policy.zeroRehearsalSafe !== undefined && typeof policy.zeroRehearsalSafe !== 'boolean') errors.push(`${policyPath}.zeroRehearsalSafe must be a boolean`);
   if (policy.requireRecentRehearsal !== undefined && typeof policy.requireRecentRehearsal !== 'boolean') errors.push(`${policyPath}.requireRecentRehearsal must be a boolean`);
   if (policy.rehearsalMaxAgeMs !== undefined && (!Number.isFinite(Number(policy.rehearsalMaxAgeMs)) || Number(policy.rehearsalMaxAgeMs) <= 0)) errors.push(`${policyPath}.rehearsalMaxAgeMs must be a positive number`);
+  if (policy.cooldownMs !== undefined && (!Number.isFinite(Number(policy.cooldownMs)) || Number(policy.cooldownMs) <= 0)) errors.push(`${policyPath}.cooldownMs must be a positive number`);
+  if (policy.repoPushLimit24h !== undefined && (!Number.isFinite(Number(policy.repoPushLimit24h)) || Number(policy.repoPushLimit24h) <= 0)) errors.push(`${policyPath}.repoPushLimit24h must be a positive number`);
+  if (policy.postPushObservationWindowMs !== undefined && (!Number.isFinite(Number(policy.postPushObservationWindowMs)) || Number(policy.postPushObservationWindowMs) <= 0)) errors.push(`${policyPath}.postPushObservationWindowMs must be a positive number`);
+  if (policy.allowMaintainerOwnedBranches !== undefined && typeof policy.allowMaintainerOwnedBranches !== 'boolean') errors.push(`${policyPath}.allowMaintainerOwnedBranches must be a boolean`);
   if (policy.branchAllowlist !== undefined && (!Array.isArray(policy.branchAllowlist) || !policy.branchAllowlist.every((item) => typeof item === 'string' && item.trim() !== ''))) {
     errors.push(`${policyPath}.branchAllowlist must be a string array`);
   }
   const pathAllowlist = configuredMinorAutoPaths(policy);
+  const rolloutMode = minorAutoRolloutMode(policy);
   if (policy.enabled === true) {
     if (policy.scope !== MINOR_AUTO_SAFE_REPAIR_SCOPE) errors.push(`${policyPath}.scope must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE} when enabled`);
     if (policy.actionClass !== AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR) errors.push(`${policyPath}.actionClass must be auto-safe-repair when enabled`);
     if (pathAllowlist.length === 0) errors.push(`${policyPath}.pathAllowlist must be a non-empty string array when enabled`);
     if (configuredMinorAutoResolvers(policy).length === 0) errors.push(`${policyPath}.resolverAllowlist must be a non-empty string array when enabled`);
+    if (rolloutMode === 'minor-auto-live-limited' && (!Array.isArray(policy.branchAllowlist) || policy.branchAllowlist.length === 0)) errors.push(`${policyPath}.branchAllowlist must be a non-empty string array for minor-auto-live-limited`);
   }
+  if (rolloutMode !== 'observe-only' && policy.enabled !== true) errors.push(`${policyPath}.enabled must be true when rolloutMode is ${rolloutMode}`);
   if (policy.pathAllowlist !== undefined && (!Array.isArray(policy.pathAllowlist) || !policy.pathAllowlist.every((item) => typeof item === 'string' && item.trim() !== ''))) {
     errors.push(`${policyPath}.pathAllowlist must be a string array`);
   }
@@ -534,6 +594,10 @@ function validateMinorAutoRepair(errors, target, targetPath) {
 export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, classification = classifyPr(pr), fields = {}) {
   const now = fields.now instanceof Date ? fields.now.getTime() : (fields.now === undefined ? Date.now() : Number(fields.now));
   const policy = minorAutoRepairPolicy(target);
+  const rolloutMode = minorAutoRolloutMode(policy);
+  const liveLimited = rolloutMode === 'minor-auto-live-limited';
+  const dryRunMode = rolloutMode === 'minor-auto-dry-run';
+  const sandboxProofMode = rolloutMode === 'sandbox-proof';
   const pathAllowlist = configuredMinorAutoPaths(policy);
   const resolverAllowlist = configuredMinorAutoResolvers(policy);
   const verifyGate = buildVerifyGate(target);
@@ -544,6 +608,13 @@ export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, class
   const contamination = findOpenClawRuntimeContextPaths([...(fields.changedPaths || []), ...(fields.artifactEvidencePaths || [])]);
   const pushLimit = Number(target.autoPushLimit24h || 0);
   const recentPushCount = recentAutoPushes(state, now).length;
+  const repoPushLimit = policy.repoPushLimit24h === undefined ? null : Number(policy.repoPushLimit24h);
+  const repoRecentPushCount = recentRepoMinorAutoPushes(state, target, now).length;
+  const cooldownMs = policy.cooldownMs === undefined ? 0 : Number(policy.cooldownMs);
+  const lastPushAt = lastMinorAutoPushAt(state);
+  const cooldownRemainingMs = lastPushAt && Number.isFinite(cooldownMs) ? Math.max(0, cooldownMs - (now - lastPushAt)) : 0;
+  const circuitBreaker = minorAutoCircuitBreaker(state);
+  const postPushStopReason = minorAutoPostPushStopReason(state);
   const maxAgeMs = policy.rehearsalMaxAgeMs === undefined ? DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS : Number(policy.rehearsalMaxAgeMs);
   const zeroRehearsalSafe = policy.zeroRehearsalSafe === true;
   const requireRecentRehearsal = !zeroRehearsalSafe && policy.requireRecentRehearsal !== false;
@@ -558,12 +629,19 @@ export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, class
   gate('minor-auto-config-enabled', policy.enabled === true, 'automaticActions.minorAutoRepair.enabled is not true');
   gate('minor-auto-scope', policy.scope === MINOR_AUTO_SAFE_REPAIR_SCOPE, `automaticActions.minorAutoRepair.scope must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE}`);
   gate('action-class-auto-safe-repair', policy.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, 'automaticActions.minorAutoRepair.actionClass must be auto-safe-repair');
+  gate('rollout-mode-configured', MINOR_AUTO_ROLLOUT_MODES.includes(policy.rolloutMode) || policy.rolloutMode === undefined, `automaticActions.minorAutoRepair.rolloutMode must be one of: ${MINOR_AUTO_ROLLOUT_MODES.join(', ')}`, { rolloutMode });
+  gate('rollout-mode-allows-controller', liveLimited || dryRunMode, `minor-auto rolloutMode ${rolloutMode} does not permit target branch mutation${sandboxProofMode ? '; run sandbox proof only' : ''}`, { rolloutMode, pushAllowed: liveLimited });
   gate('single-target-only', selectedTargetCount === 1, 'minor-auto-safe repair may select exactly one target; broad --all mutation requires approval');
   gate('dirty-current-pr', classification?.kind === 'dirty', `current classification ${classification?.kind || 'unknown'} is not dirty`);
   gate('checks-pass-or-unrelated', (classification?.checks?.failed || []).length === 0 && (classification?.checks?.pending || []).length === 0, 'failed or pending checks block minor-auto-safe repair');
   gate('strict-verify-gate', verifyGate.status !== 'missing', verifyGate.reason || 'strict verify gate is missing', { verifyGate });
-  gate('push-budget', Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit, '24h push budget is exhausted or not configured', { recentPushCount, pushLimit });
-  gate('branch-allowlist', branchAllowlist.length === 0 || (headBranch && branchAllowlist.includes(headBranch)), `head branch ${headBranch || '(unknown)'} is not in automaticActions.minorAutoRepair.branchAllowlist`, { headBranch });
+  gate('push-budget', !liveLimited || (Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit), '24h push budget is exhausted or not configured', { recentPushCount, pushLimit });
+  gate('repo-push-budget', !liveLimited || repoPushLimit === null || (Number.isFinite(repoPushLimit) && repoRecentPushCount < repoPushLimit), '24h repo push budget is exhausted', { repoRecentPushCount, repoPushLimit });
+  gate('push-cooldown', !liveLimited || cooldownRemainingMs === 0, `minor-auto push cooldown has ${cooldownRemainingMs}ms remaining`, { cooldownMs, lastPushAt: lastPushAt ? new Date(lastPushAt).toISOString() : null, cooldownRemainingMs });
+  gate('circuit-breaker-closed', circuitBreaker.state !== 'open', `minor-auto circuit breaker is open: ${circuitBreaker.reason || 'operator review required'}`, { circuitBreaker });
+  gate('post-push-observation-clear', !postPushStopReason, `previous minor-auto post-push observation requires stop: ${postPushStopReason}`, { lastMinorAutoPostPushObservation: state.lastMinorAutoPostPushObservation || null });
+  gate('branch-allowlist', branchAllowlist.length > 0 && headBranch && branchAllowlist.includes(headBranch), `head branch ${headBranch || '(unknown)'} is not in automaticActions.minorAutoRepair.branchAllowlist`, { headBranch });
+  gate('target-ownership-guard', !(target.headOwner && target.baseOwner && target.headOwner === target.baseOwner) || policy.allowMaintainerOwnedBranches === true, 'maintainer-owned head branches require automaticActions.minorAutoRepair.allowMaintainerOwnedBranches=true', { headOwner: target.headOwner || null, baseOwner: target.baseOwner || null });
   gate('path-allowlist-configured', pathAllowlist.length > 0, 'automaticActions.minorAutoRepair.pathAllowlist is required');
   gate('resolver-allowlist-configured', resolverAllowlist.length > 0, 'automaticActions.minorAutoRepair.resolverAllowlist is required');
   gate('dry-run-preview', !requireRecentRehearsal || rehearsalFreshForMinorAuto(target, state, pr, now, maxAgeMs), 'fresh dry-run/rehearsal evidence is required before minor-auto-safe repair', { zeroRehearsalSafe, maxAgeMs });
@@ -589,6 +667,7 @@ export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, class
     schema: 'pr-shepherd-minor-auto-repair-gate/v1',
     createdAt: new Date(now).toISOString(),
     lane: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+    rolloutMode,
     target: target.id || null,
     pr: targetPrRef(target) || target.pr || null,
     gateAllowed: blockedReasons.length === 0,
@@ -596,11 +675,27 @@ export function buildMinorAutoRepairGate(target = {}, state = {}, pr = {}, class
     blockedReasons,
     gates,
     actionClass: blockedReasons.length === 0 ? AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR : AUTOMATIC_ACTION_CLASSES.BLOCK,
-    requiresOperatorApproval: blockedReasons.length > 0,
+    requiresOperatorApproval: blockedReasons.length > 0 || !liveLimited,
+    pushAllowed: blockedReasons.length === 0 && liveLimited,
+    dryRunAllowed: blockedReasons.length === 0 && dryRunMode,
     zeroRehearsalSafe,
     changedPaths,
     pathAllowlist,
     resolverAllowlist,
+    rolloutControls: {
+      mode: rolloutMode,
+      liveLimited,
+      dryRunMode,
+      sandboxProofMode,
+      circuitBreaker,
+      cooldownMs: Number.isFinite(cooldownMs) ? cooldownMs : null,
+      cooldownRemainingMs,
+      repoPushLimit24h: repoPushLimit,
+      repoRecentPushCount,
+      postPushStopReason,
+      noAutoMerge: true,
+      noFixUntilGreenLoop: true,
+    },
     verifyGate,
     evidenceHygiene: {
       sanitized: true,
@@ -660,6 +755,9 @@ export function buildMinorAutoExecutionController(target = {}, pr = {}, state = 
   const expectedRemoteHeadOid = fields.expectedRemoteHeadOid || fields.expectedHeadOid || plan?.headRefOid || pr?.headRefOid || state.lastSeenHeadOid || null;
   const currentRemoteHeadOid = fields.currentRemoteHeadOid || fields.remoteHeadOid || fields.prePushRemoteHeadOid || fields.prePushHeadOid || null;
   const headBranch = target.headBranch || pr?.headRefName || plan?.headBranch || null;
+  const rolloutMode = minorAutoRepairGate.rolloutMode || plan?.rolloutMode || minorAutoRolloutMode(minorAutoRepairPolicy(target));
+  const liveLimited = rolloutMode === 'minor-auto-live-limited';
+  const dryRunMode = rolloutMode === 'minor-auto-dry-run' || plan?.dryRun === true || fields.dryRun === true;
   const pushLimit = Number(target.autoPushLimit24h || 0);
   const recentPushCount = recentAutoPushes(state, now.getTime()).length;
   const verifyGate = buildVerifyGate(target);
@@ -676,8 +774,13 @@ export function buildMinorAutoExecutionController(target = {}, pr = {}, state = 
   gate('plan-lane-minor-auto-safe-repair', plan?.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE, `planned lane must be ${MINOR_AUTO_SAFE_REPAIR_SCOPE}`, { lane: plan?.lane || null });
   gate('plan-action-class-auto-safe-repair', plan?.actionClass === AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, 'planned actionClass must be auto-safe-repair', { actionClass: plan?.actionClass || null });
   gate('plan-allowed', plan?.allowed === true, `planned action is blocked: ${(plan?.reasons || []).join('; ') || 'policy denied'}`);
-  gate('plan-push-contract', plan?.pushAllowed === true && plan?.mutatesBranch === true && plan?.writesArtifact !== true && plan?.requiresOperatorApproval !== true,
-    'minor-auto execution requires pushAllowed=true, mutatesBranch=true, writesArtifact=false, and requiresOperatorApproval=false', {
+  gate('plan-push-contract', liveLimited
+    ? plan?.pushAllowed === true && plan?.mutatesBranch === true && plan?.writesArtifact !== true && plan?.requiresOperatorApproval !== true
+    : dryRunMode && plan?.pushAllowed !== true && plan?.mutatesBranch !== true && plan?.writesArtifact !== true && plan?.requiresOperatorApproval !== true,
+    liveLimited
+      ? 'minor-auto live execution requires pushAllowed=true, mutatesBranch=true, writesArtifact=false, and requiresOperatorApproval=false'
+      : 'minor-auto dry-run rollout requires pushAllowed=false, mutatesBranch=false, writesArtifact=false, and requiresOperatorApproval=false', {
+      rolloutMode,
       pushAllowed: Boolean(plan?.pushAllowed),
       mutatesBranch: Boolean(plan?.mutatesBranch),
       writesArtifact: Boolean(plan?.writesArtifact),
@@ -685,10 +788,10 @@ export function buildMinorAutoExecutionController(target = {}, pr = {}, state = 
     });
   gate('minor-auto-repair-gate', minorAutoRepairGate.gateAllowed === true, `minor-auto gate blocked: ${(minorAutoRepairGate.blockedReasons || []).join('; ') || 'gateAllowed is not true'}`, { minorAutoRepairGate });
   gate('focused-checks-passed', verifyGate.status !== 'missing' && focusedChecksPassed, focusedChecksPassed ? (verifyGate.reason || 'strict verify gate is missing') : 'focused checks must pass immediately before minor-auto push', { verifyGate, focusedChecksPassed });
-  gate('push-budget', Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit, '24h push budget is exhausted or not configured', { recentPushCount, pushLimit });
+  gate('push-budget', !liveLimited || (Number.isFinite(pushLimit) && pushLimit > 0 && recentPushCount < pushLimit), '24h push budget is exhausted or not configured', { recentPushCount, pushLimit });
   gate('circuit-breaker', state.lastRepairFailureKey !== repairKey, `repair already failed for current head/base state: ${repairKey}`, { repairKey });
-  gate('pre-push-remote-head-present', Boolean(currentRemoteHeadOid), 'fresh pre-push remote head is required before minor-auto push', { currentRemoteHeadOid });
-  gate('expected-head-force-with-lease', Boolean(headBranch && expectedRemoteHeadOid && currentRemoteHeadOid && currentRemoteHeadOid === expectedRemoteHeadOid),
+  gate('pre-push-remote-head-present', !liveLimited || Boolean(currentRemoteHeadOid), 'fresh pre-push remote head is required before minor-auto push', { currentRemoteHeadOid });
+  gate('expected-head-force-with-lease', !liveLimited || Boolean(headBranch && expectedRemoteHeadOid && currentRemoteHeadOid && currentRemoteHeadOid === expectedRemoteHeadOid),
     `pre-push remote head changed or is incomplete; refusing force-with-lease. expected ${expectedRemoteHeadOid || '(missing)'}, got ${currentRemoteHeadOid || '(missing)'}`, {
       headBranch,
       expectedRemoteHeadOid,
@@ -703,17 +806,19 @@ export function buildMinorAutoExecutionController(target = {}, pr = {}, state = 
     schema: 'pr-shepherd-minor-auto-execution-controller/v1',
     createdAt: now.toISOString(),
     lane: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+    rolloutMode,
     target: target.id || null,
     pr: targetPrRef(target) || target.pr || null,
     url: target.url || pr?.url || null,
     status: executionAllowed ? 'ready' : 'blocked',
     executionAllowed,
     actionClass: executionAllowed ? AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR : AUTOMATIC_ACTION_CLASSES.BLOCK,
-    pushAllowed: executionAllowed,
-    mutatesBranch: executionAllowed,
+    pushAllowed: executionAllowed && liveLimited,
+    mutatesBranch: executionAllowed && liveLimited,
+    dryRun: executionAllowed && dryRunMode,
     writesArtifact: false,
     requiresOperatorApproval: false,
-    productionMutation: false,
+    productionMutation: executionAllowed && liveLimited,
     blockedReasons,
     gates,
     plan: explainAutomaticActionPlan(plan || {}),
@@ -724,6 +829,15 @@ export function buildMinorAutoExecutionController(target = {}, pr = {}, state = 
       headRefOid: expectedRemoteHeadOid,
       baseRefOid: baseOid || null,
       repairKey,
+    },
+    rolloutControls: {
+      mode: rolloutMode,
+      liveLimited,
+      dryRunMode,
+      noAutoMerge: true,
+      noFixUntilGreenLoop: true,
+      noBroadAllLiveMutation: true,
+      escalation: 'Seo Jin On approval required for major, risky, semantic, ops-impact, codeAssisted, or humanOnly changes',
     },
     pushGuard: {
       expectedRemoteHeadOid,
@@ -779,7 +893,9 @@ export function buildMinorAutoExecutionController(target = {}, pr = {}, state = 
       forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
     },
     operatorSummary: executionAllowed
-      ? 'minor-auto execution ready: exact path/resolver gates, focused checks, push budget, contamination guard, and expected-head force-with-lease passed'
+      ? (liveLimited
+        ? 'minor-auto execution ready: exact path/resolver gates, focused checks, push budget, contamination guard, and expected-head force-with-lease passed'
+        : 'minor-auto dry-run controller ready: exact gates and focused checks passed; push remains disabled')
       : `minor-auto execution blocked: ${blockedReasons.join('; ')}`,
     terminalLedgerMarker: executionAllowed ? 'Done' : 'Block',
   }, target);
@@ -801,15 +917,15 @@ export function executeMinorAutoExecutionController(controller = {}, handlers = 
     err.execution = execution;
     throw err;
   }
-  if (opts.dryRun) {
+  if (opts.dryRun || controller.dryRun === true || controller.pushAllowed !== true) {
     return automaticActionExecution({
       actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
       allowed: true,
-      pushAllowed: true,
-      mutatesBranch: true,
+      pushAllowed: false,
+      mutatesBranch: false,
       writesArtifact: false,
       requiresOperatorApproval: false,
-      reasons: [controller.operatorSummary || 'minor-auto execution ready'],
+      reasons: [controller.operatorSummary || 'minor-auto dry-run execution ready'],
     }, 'planned', { dryRun: true, result: controller });
   }
   const handler = typeof handlers === 'function' ? handlers : handlers[AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR];
@@ -1824,6 +1940,9 @@ export function buildTargetIncidentSummary(target = {}, state = {}, observationS
 
 export function buildFleetOperatorBrief(rows = []) {
   const counts = Object.fromEntries(FLEET_TARGET_STATE_TIERS.map((tier) => [tier, 0]));
+  const rolloutModes = Object.fromEntries(MINOR_AUTO_ROLLOUT_MODES.map((mode) => [mode, 0]));
+  const rolloutOutcomes = {};
+  const dashboard = { candidates: 0, autoRepaired: 0, blockedNeedsApproval: 0, staleRefreshRequired: 0, circuitBreakerOpen: 0, postPushOutcomes: rolloutOutcomes };
   const byKind = {};
   const affectedTargets = [];
   for (const row of rows) {
@@ -1831,6 +1950,16 @@ export function buildFleetOperatorBrief(rows = []) {
     counts[tier] += 1;
     const kind = row?.lastKind || row?.kind || 'unknown';
     byKind[kind] = (byKind[kind] || 0) + 1;
+    const rolloutMode = row?.minorAutoRollout?.mode || 'observe-only';
+    if (rolloutModes[rolloutMode] !== undefined) rolloutModes[rolloutMode] += 1;
+    const rolloutStatus = row?.minorAutoRollout?.status || null;
+    if (rolloutStatus === 'candidate') dashboard.candidates += 1;
+    if (rolloutStatus === 'auto-repaired') dashboard.autoRepaired += 1;
+    if (rolloutStatus === 'blocked-needs-approval') dashboard.blockedNeedsApproval += 1;
+    if (rolloutStatus === 'stale-refresh-required') dashboard.staleRefreshRequired += 1;
+    if (row?.minorAutoRollout?.circuitBreaker?.state === 'open') dashboard.circuitBreakerOpen += 1;
+    const postPushOutcome = row?.minorAutoRollout?.lastPostPushOutcome || null;
+    if (postPushOutcome) rolloutOutcomes[postPushOutcome] = (rolloutOutcomes[postPushOutcome] || 0) + 1;
     if (row?.incident) affectedTargets.push(row.target);
   }
   const blockedCount = rows.filter((row) => row?.automaticAction?.status === 'blocked' || row?.incident?.severity === 'block').length;
@@ -1839,6 +1968,8 @@ export function buildFleetOperatorBrief(rows = []) {
     schema: 'pr-shepherd-fleet-operator-brief/v1',
     targets: rows.length,
     tiers: counts,
+    minorAutoRolloutModes: rolloutModes,
+    minorAutoDashboard: dashboard,
     byKind,
     cleanCount: byKind.clean || 0,
     warningCount,
@@ -1858,12 +1989,29 @@ export function buildStatusRows(targets, now = Date.now()) {
     const observationSummary = state.observationSummary || summarizeObservationLedger(state.observationLedger || [], summaryNow);
     const incident = buildTargetIncidentSummary(target, state, observationSummary);
     const targetTier = targetStateTier(target, state, Number(summaryNow));
+    const minorPolicy = minorAutoRepairPolicy(target);
+    const minorGate = state.lastMinorAutoRepairGate || null;
+    const minorPostPush = state.lastMinorAutoPostPushObservation || null;
+    const minorAutoRollout = {
+      mode: minorAutoRolloutMode(minorPolicy),
+      enabled: minorPolicy.enabled === true,
+      circuitBreaker: minorAutoCircuitBreaker(state),
+      lastGateAllowed: minorGate?.gateAllowed ?? null,
+      lastPostPushOutcome: minorPostPush?.outcome || null,
+      status: minorPostPush?.outcome === 'stale-refresh-required'
+        ? 'stale-refresh-required'
+        : (minorPostPush?.outcome || (minorGate?.gateAllowed === true ? 'candidate' : (minorGate?.status || 'observe-only'))),
+      pushBudgetRemaining24h: Math.max(0, Number(target.autoPushLimit24h || 0) - recentAutoPushes(state, now).length),
+      noAutoMerge: true,
+      escalation: 'Seo Jin On approval required for major/risky/semantic/ops-impact changes',
+    };
     return {
       target: target.id,
       pr: target.pr,
       targetTier,
       verifyGate: buildVerifyGate(target),
       liveRepairApprovalState: liveRepairApprovalState(target, state, {}, Number(summaryNow)),
+      minorAutoRollout,
       incident,
       statePath: target.statePath || null,
       stateExists: Boolean(target.statePath && existsSync(target.statePath)),
@@ -2670,14 +2818,20 @@ export function planAutomaticAction(target, state = {}, pr = {}, classification 
       selectedTargetCount: opts.selectedTargetCount,
     });
     if (minorGate.gateAllowed) {
+      const rolloutMode = minorGate.rolloutMode || minorAutoRolloutMode(minorAutoRepairPolicy(target));
+      const liveLimited = rolloutMode === 'minor-auto-live-limited';
       return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, {
         ...base,
         lane: MINOR_AUTO_SAFE_REPAIR_SCOPE,
-        pushAllowed: true,
-        mutatesBranch: true,
+        rolloutMode,
+        pushAllowed: liveLimited,
+        mutatesBranch: liveLimited,
+        dryRun: !liveLimited,
         requiresOperatorApproval: false,
         minorAutoRepairGate: minorGate,
-        reasons: ['all minor-auto-safe repair gates passed; exact changed-path guard deferred until immediately before push'],
+        reasons: [liveLimited
+          ? 'all minor-auto-safe repair gates passed; exact changed-path guard deferred until immediately before push'
+          : 'minor-auto dry-run rollout gates passed; controller may run without pushing'],
       });
     }
     return buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.BLOCK, {
@@ -2841,6 +2995,88 @@ export function buildPostActionAuditEntry(target = {}, pr = {}, outcome = 'block
     operatorSummary: fields.operatorSummary || `${target.id || 'target'} ${outcome}; see actionLedger and status follow-up for evidence.`,
   };
   return redactLedgerValue(audit, target);
+}
+
+export function buildMinorAutoRollbackGuidance(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const observation = fields.observation || state.lastMinorAutoPostPushObservation || null;
+  const from = fields.from || observation?.expectedRefs?.beforeHeadOid || null;
+  const to = fields.to || observation?.expectedRefs?.afterHeadOid || pr?.headRefOid || null;
+  const reason = fields.reason || observation?.operatorSummary || 'post-push CI failed or became unstable';
+  return redactLedgerValue({
+    schema: 'pr-shepherd-minor-auto-rollback-guidance/v1',
+    createdAt: now.toISOString(),
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    url: target.url || pr?.url || null,
+    reason,
+    autoMergeAllowed: false,
+    retryLoopAllowed: false,
+    furtherMinorAutoAttemptsBlocked: true,
+    circuitBreaker: {
+      state: 'open',
+      reason,
+      openedAt: now.toISOString(),
+    },
+    revertGuidance: {
+      preferred: 'ask Seo Jin On for approval before reverting or force-pushing any production branch',
+      candidateCommand: to ? `git revert ${to}` : null,
+      alternative: from ? `restore the branch to ${from} only with explicit operator approval and force-with-lease` : null,
+    },
+    escalation: 'Seo Jin On approval required for failed/unstable post-push CI, semantic changes, risky paths, ops-impact changes, or any revert/rollback',
+    evidenceHygiene: {
+      sanitized: true,
+      noRawShellTranscript: true,
+      noSecretsOrPrivatePaths: true,
+      forbiddenRuntimeContextPaths: [...OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, '.openclaw/**'],
+    },
+  }, target);
+}
+
+export function buildMinorAutoPostPushObservation(target = {}, pr = {}, state = {}, fields = {}) {
+  const now = fields.now instanceof Date ? fields.now : new Date(fields.now || Date.now());
+  const classification = fields.classification || classifyPr(pr || {});
+  const policy = minorAutoRepairPolicy(target);
+  const observationWindowMs = policy.postPushObservationWindowMs === undefined
+    ? DEFAULT_MINOR_AUTO_POST_PUSH_OBSERVATION_WINDOW_MS
+    : Number(policy.postPushObservationWindowMs);
+  const failed = classification?.checks?.failed || [];
+  const pending = classification?.checks?.pending || [];
+  const kind = classification?.kind || 'unknown';
+  const outcome = failed.length > 0 || kind === 'failed'
+    ? 'post-push-failed'
+    : (kind === 'unknown' || pending.length > 0 ? 'post-push-unstable' : (kind === 'dirty' ? 'stale-refresh-required' : 'post-push-clean'));
+  const rolloutStopRequired = outcome === 'post-push-failed' || outcome === 'post-push-unstable';
+  const reason = rolloutStopRequired
+    ? `minor-auto post-push observation is ${outcome}; stop further attempts and escalate`
+    : (outcome === 'stale-refresh-required' ? 'PR remains dirty after push; refresh status before any further action' : 'post-push observation is clean');
+  const packet = {
+    schema: 'pr-shepherd-minor-auto-post-push-observation/v1',
+    createdAt: now.toISOString(),
+    target: target.id || null,
+    pr: targetPrRef(target) || target.pr || null,
+    url: target.url || pr?.url || null,
+    rolloutMode: minorAutoRolloutMode(policy),
+    observationWindowMs: Number.isFinite(observationWindowMs) ? observationWindowMs : DEFAULT_MINOR_AUTO_POST_PUSH_OBSERVATION_WINDOW_MS,
+    outcome,
+    rolloutStopRequired,
+    autoMergeAllowed: false,
+    retryLoopAllowed: false,
+    classification: kind,
+    failedChecks: failed.map((check) => check.name || check.workflowName || check.context || 'unknown'),
+    pendingChecks: pending.map((check) => check.name || check.workflowName || check.context || 'unknown'),
+    expectedRefs: {
+      beforeHeadOid: fields.beforeHeadOid || state.lastPostActionAudit?.expectedRefs?.beforeHeadOid || null,
+      afterHeadOid: fields.afterHeadOid || pr?.headRefOid || state.lastPostActionAudit?.expectedRefs?.afterHeadOid || null,
+      baseRefOid: fields.baseOid || currentBaseOid(state, pr) || null,
+    },
+    rollbackGuidance: null,
+    circuitBreakerTransition: rolloutStopRequired ? { state: 'open', reason, openedAt: now.toISOString() } : { state: 'closed', reason: null },
+    operatorSummary: reason,
+    terminalLedgerMarker: rolloutStopRequired ? 'Block' : 'Done',
+  };
+  if (rolloutStopRequired) packet.rollbackGuidance = buildMinorAutoRollbackGuidance(target, pr, state, { now, observation: packet, reason });
+  return redactLedgerValue(packet, target);
 }
 
 export function buildLiveRepairExecutionHarness(target = {}, pr = {}, state = {}, fields = {}) {
@@ -3175,6 +3411,22 @@ function handleCheck(target, opts = {}) {
   }
 
   const now = new Date();
+  const lastMinorAutoPush = [...(state.autoPushes || [])]
+    .reverse()
+    .find((push) => push?.reason === MINOR_AUTO_SAFE_REPAIR_SCOPE || push?.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE);
+  if (lastMinorAutoPush) {
+    const previousObservedHead = state.lastMinorAutoPostPushObservation?.expectedRefs?.afterHeadOid || null;
+    const pushedHead = lastMinorAutoPush.to || state.lastPostActionAudit?.expectedRefs?.afterHeadOid || pr.headRefOid || null;
+    if (previousObservedHead !== pushedHead || ['failed', 'unstable', 'unknown', 'dirty'].includes(classification.kind)) {
+      const observation = buildMinorAutoPostPushObservation(target, pr, state, {
+        now,
+        beforeHeadOid: lastMinorAutoPush.from || state.lastPostActionAudit?.expectedRefs?.beforeHeadOid || null,
+        afterHeadOid: pushedHead,
+      });
+      state.lastMinorAutoPostPushObservation = observation;
+      if (observation.rolloutStopRequired) state.minorAutoCircuitBreaker = observation.circuitBreakerTransition;
+    }
+  }
   const plannedAction = explainAutomaticActionPlan(planAutomaticAction(target, state, pr, classification, { dryRun: true, now: now.getTime() }));
   recordObservation(state, target, pr, classification, plannedAction, now);
   maybeNotifySituationReport(target, state, pr, classification, now);
@@ -4266,13 +4518,27 @@ function handleRepair(target, dryRun, opts = {}) {
         saveJson(target.statePath, state);
         throw new Error(`minor-auto-safe execution blocked: ${controller.blockedReasons.join('; ')}`);
       }
+      if (controller.pushAllowed !== true) {
+        state.lastPostActionAudit = controller.postActionAudit.block;
+        state.lastActionSummary = controller.operatorSummary;
+        appendPlanLedgerEntry(state, target, postFetchPlan, 'planned', {
+          repairKey,
+          expectedHeadOid: pr.headRefOid || null,
+          expectedBaseOid: baseOid,
+          rollbackNote: 'minor-auto dry-run rollout completed; push disabled and no branch mutation attempted',
+          details: { minorAutoExecutionController: controller },
+        });
+        notify(target, state, `minor-auto-dry-run:${repairKey}`, `${target.pr} ${controller.operatorSummary}`, true);
+        saveJson(target.statePath, state);
+        return;
+      }
     }
     if (ls !== remoteHead) throw new Error(`remote head changed; refusing push. expected ${remoteHead}, got ${ls}`);
     run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
     const pushedAt = new Date();
     const minorAutoLane = postFetchPlan.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE;
-    state.autoPushes = [...pushes24h, { at: pushedAt.toISOString(), from: remoteHead, to: newHead, reason: minorAutoLane ? MINOR_AUTO_SAFE_REPAIR_SCOPE : 'dirty-rebase' }];
+    state.autoPushes = [...pushes24h, { at: pushedAt.toISOString(), from: remoteHead, to: newHead, reason: minorAutoLane ? MINOR_AUTO_SAFE_REPAIR_SCOPE : 'dirty-rebase', lane: minorAutoLane ? MINOR_AUTO_SAFE_REPAIR_SCOPE : 'approval-required-auto-safe-repair', repo: target.owner && target.repo ? `${target.owner}/${target.repo}` : null }];
     consumeLiveRepairApproval(state, target, 'pushed', 'auto-safe-repair pushed', pushedAt);
     state.lastPostActionAudit = buildPostActionAuditEntry(target, { ...pr, baseRefOid: baseOid }, 'pushed', {
       state,

@@ -6,11 +6,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   AUTOMATIC_ACTION_CLASSES,
+  MINOR_AUTO_ROLLOUT_MODES,
   MINOR_AUTO_SAFE_REPAIR_SCOPE,
   REVIEW_DECISION_OUTCOMES,
   appendActionLedgerEntry,
   appendOperatorDecisionLedgerEntry,
   buildMinorAutoExecutionController,
+  buildMinorAutoPostPushObservation,
   buildMinorAutoRepairGate,
   appendSupervisedRehearsalQueueLedgerEntry,
   buildConflictArtifactPayload,
@@ -342,6 +344,7 @@ test('validateConfigObject supports bounded minor-auto-safe repair policy and re
           enabled: true,
           scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
           actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+          rolloutMode: 'minor-auto-live-limited',
           branchAllowlist: ['feature'],
           pathAllowlist: ['CHANGELOG.md', 'docs/**'],
           resolverAllowlist: ['merge-changelog-top-entry'],
@@ -380,6 +383,64 @@ const multiTargetApproval = {
   approvedBy: 'operator',
   targetIds: ['target-1', 'target-2'],
 };
+
+test('minor-auto rollout modes default to observe-only and validate live-limited controls', () => {
+  assert.deepEqual(MINOR_AUTO_ROLLOUT_MODES, ['observe-only', 'sandbox-proof', 'minor-auto-dry-run', 'minor-auto-live-limited']);
+
+  const observeTarget = validationTarget({
+    automaticActions: {
+      minorAutoRepair: {
+        enabled: true,
+        scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        branchAllowlist: ['feature'],
+        pathAllowlist: ['CHANGELOG.md'],
+        resolverAllowlist: ['merge-changelog-top-entry'],
+        zeroRehearsalSafe: true,
+      },
+    },
+  });
+  const pr = { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const observeGate = buildMinorAutoRepairGate(observeTarget, {}, pr, classification, { changedPaths: ['CHANGELOG.md'] });
+  assert.equal(observeGate.rolloutMode, 'observe-only');
+  assert.equal(observeGate.gateAllowed, false);
+  assert.match(observeGate.blockedReasons.join('\\n'), /observe-only/);
+
+  const dryRunTarget = validationTarget({
+    automaticActions: {
+      minorAutoRepair: {
+        ...observeTarget.automaticActions.minorAutoRepair,
+        rolloutMode: 'minor-auto-dry-run',
+      },
+    },
+  });
+  const dryRunPlan = planAutomaticAction(dryRunTarget, {}, pr, classification, { dryRun: false, now: Date.parse('2026-05-09T10:00:00Z') });
+  assert.equal(dryRunPlan.allowed, true);
+  assert.equal(dryRunPlan.pushAllowed, false);
+  assert.equal(dryRunPlan.mutatesBranch, false);
+  assert.equal(dryRunPlan.dryRun, true);
+
+  const liveTarget = validationTarget({
+    automaticActions: {
+      minorAutoRepair: {
+        ...observeTarget.automaticActions.minorAutoRepair,
+        rolloutMode: 'minor-auto-live-limited',
+      },
+    },
+  });
+  const breakerGate = buildMinorAutoRepairGate(liveTarget, { minorAutoCircuitBreaker: { state: 'open', reason: 'post-push failed' } }, pr, classification, { changedPaths: ['CHANGELOG.md'] });
+  assert.equal(breakerGate.gateAllowed, false);
+  assert.match(breakerGate.blockedReasons.join('\n'), /circuit breaker is open/);
+
+  const bad = validateConfigObject({
+    targets: [validationTarget({
+      automaticActions: { minorAutoRepair: { enabled: true, rolloutMode: 'minor-auto-live-limited', scope: MINOR_AUTO_SAFE_REPAIR_SCOPE, actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR, pathAllowlist: ['CHANGELOG.md'], resolverAllowlist: ['merge-changelog-top-entry'] } },
+    })],
+  });
+  assert.equal(bad.ok, false);
+  assert.match(bad.errors.join('\\n'), /branchAllowlist must be a non-empty string array/);
+});
 
 test('multi-target live repair requires explicit fleet approval naming selected targets', () => {
   const targets = [validationTarget(), validationTarget({ id: 'target-2', number: 2, statePath: '/tmp/pr-shepherd/state-2.json', lockPath: '/tmp/pr-shepherd/lock-2.lock' })];
@@ -1643,6 +1704,7 @@ test('minor-auto-safe repair lane permits only bounded low-risk changed paths wi
         enabled: true,
         scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
         actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        rolloutMode: 'minor-auto-live-limited',
         branchAllowlist: ['feature'],
         pathAllowlist: ['CHANGELOG.md', 'docs/**'],
         resolverAllowlist: ['merge-changelog-top-entry'],
@@ -1688,6 +1750,7 @@ test('minor-auto execution controller requires final refs, focused checks, and c
         enabled: true,
         scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
         actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        rolloutMode: 'minor-auto-live-limited',
         branchAllowlist: ['feature'],
         pathAllowlist: ['CHANGELOG.md', 'docs/**'],
         resolverAllowlist: ['merge-changelog-top-entry'],
@@ -1739,6 +1802,40 @@ test('minor-auto execution controller requires final refs, focused checks, and c
   assert.deepEqual(blocked.evidenceHygiene.offendingRuntimeContextPaths, ['AGENTS.md']);
   const blockedExecution = executeMinorAutoExecutionController(blocked, {}, { throwOnBlocked: false });
   assert.equal(blockedExecution.status, 'blocked');
+});
+
+test('minor-auto rollout opens circuit breaker guidance after failed post-push observation', () => {
+  const target = validationTarget({
+    automaticActions: {
+      minorAutoRepair: {
+        enabled: true,
+        rolloutMode: 'minor-auto-live-limited',
+        scope: MINOR_AUTO_SAFE_REPAIR_SCOPE,
+        actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
+        branchAllowlist: ['feature'],
+        pathAllowlist: ['CHANGELOG.md'],
+        resolverAllowlist: ['merge-changelog-top-entry'],
+        zeroRehearsalSafe: true,
+      },
+    },
+  });
+  const observation = buildMinorAutoPostPushObservation(target, {
+    ...base,
+    headRefOid: 'newhead',
+    mergeable: 'UNKNOWN',
+    mergeStateStatus: 'UNKNOWN',
+    statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' }],
+  }, { lastPostActionAudit: { expectedRefs: { beforeHeadOid: 'oldhead', afterHeadOid: 'newhead' } } }, {
+    now: new Date('2026-05-09T11:00:00Z'),
+  });
+  assert.equal(observation.schema, 'pr-shepherd-minor-auto-post-push-observation/v1');
+  assert.equal(observation.outcome, 'post-push-failed');
+  assert.equal(observation.autoMergeAllowed, false);
+  assert.equal(observation.retryLoopAllowed, false);
+  assert.equal(observation.rolloutStopRequired, true);
+  assert.equal(observation.circuitBreakerTransition.state, 'open');
+  assert.equal(observation.rollbackGuidance.furtherMinorAutoAttemptsBlocked, true);
+  assert.match(observation.rollbackGuidance.escalation, /Seo Jin On approval/);
 });
 
 test('automatic action explanations cover every action class without executing handlers', () => {
