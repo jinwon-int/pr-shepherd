@@ -49,6 +49,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   repository repair with strict scope, verification, closeout markers, and runtime/bootstrap contamination guards.
 - `phase-n-minor-auto-execution-controller.md` — Phase N runbook for operating the built-in
   `minor-auto-safe-repair` execution controller with final changed-path, resolver, push, and evidence gates.
+- `phase-o-minor-auto-rollout-operations.md` — Phase O runbook for staged `minor-auto-safe-repair` rollout,
+  one-target tier promotion, rollback controls, closeout markers, and evidence contamination guards.
 
 ## Safe install sketch
 
@@ -285,6 +287,16 @@ contamination guard, verifies the expected remote head, and pushes only through 
 `Done` or `Block` and returns `startCommentUrl` plus the matching terminal URL when available. Phase N does not permit
 multi-target mutation, failed/pending-check repair, allowlist widening during execution, broad live repair, or retries
 after drift without a fresh Start marker and fresh gates.
+
+## Phase O minor-auto rollout operations
+
+Use `phase-o-minor-auto-rollout-operations.md` after Phase N is reviewed and the operator wants to move
+`automaticActions.minorAutoRepair` through shadow, dry-run, single-target live, limited expansion, pause, or rollback.
+Phase O promotes one target by one tier at a time, records rollback ownership and source-backed Phase N evidence,
+keeps rollout evidence sanitized, and blocks if branch diff or artifact evidence would include runtime/bootstrap
+context paths. It starts with `Start`, closes with exactly one of `PR: <url>`, `Done`, or `Block`, and returns
+`startCommentUrl` plus the matching terminal URL when available. A Phase O promotion does not replace the separate
+Phase N `Start`, final gate, expected-head check, and controller closeout required for any branch-mutating repair run.
 
 ## Field doctor
 
