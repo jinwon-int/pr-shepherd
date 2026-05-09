@@ -13,6 +13,7 @@ node pr-shepherd.mjs check --config config.json
 node pr-shepherd.mjs check --config config.json --target openclaw-78261
 node pr-shepherd.mjs check --config config.json --all
 node pr-shepherd.mjs check-canary --config config.json --target openclaw-78261
+node pr-shepherd.mjs diagnose --config config.json --target openclaw-78261 --artifact-dir ./artifacts
 node pr-shepherd.mjs rehearse --config config.json --target openclaw-78261
 node pr-shepherd.mjs repair --config config.json --dry-run
 node pr-shepherd.mjs repair --config config.json --target openclaw-78261 --dry-run
@@ -61,6 +62,8 @@ Automatic scheduler lanes:
 
 Commands that require operator approval:
 
+- `diagnose`: allowed for non-mutating conflict analysis; it refreshes PR state, writes a sanitized conflict diagnosis
+  bundle, and must not edit the watched worktree or push.
 - `rehearse` and `repair --dry-run`: allowed after an operator asks for investigation; they may prepare repair
   evidence but must not push.
 - live `repair`: allowed only after the operator names the target PR, confirms write credentials and worktree
@@ -213,6 +216,32 @@ record for one target and exact argv, strict verification, contamination guard, 
 `repair --all`, unattended force-pushes, or automatic expansion from one target to a fleet. `gh pr view --json` fetch
 fields intentionally exclude unsupported fields such as `baseRefOid`; base OIDs stay internal state/evidence values
 only.
+
+### Phase G diagnose-only conflict bundles
+
+`diagnose` is the safe Phase G lane for an operator or worker that needs more context before deciding between
+`autoSafe`, `codeAssisted`, `humanOnly`, no-op, or wait/recheck. It runs the same read-only PR check path, fetches
+read-only changed-file summaries, and writes `<target>-conflict-diagnosis.json` under the configured artifact dir.
+The bundle includes target/PR metadata, head/base evidence, mergeability/check summaries, known conflict paths from
+state or sandbox evidence, path classifications, focused check hints, sanitized operator next actions, and evidence
+hygiene. It never pushes and does not edit the watched worktree.
+
+Targets may provide diagnosis-only hints for repo-owned paths:
+
+```json
+"diagnosisHints": [
+  {
+    "path": "extensions/telegram/src/**",
+    "summary": "Review outbound receipt and adapter mapping before choosing a resolver.",
+    "commands": ["pnpm test extensions/telegram/src/outbound-adapter.test.ts"]
+  }
+]
+```
+
+Hint commands are suggestions only. Validation accepts a narrow read-only allowlist (`npm/pnpm/yarn test|run`,
+`node --check|--test`, and safe `git diff --check`/`git grep`/`git show --stat`/`git log --oneline`) and fails closed
+for shell metacharacters, mutation commands, network/write tools, token/env reads, private absolute paths, or
+OpenClaw runtime/bootstrap context paths.
 
 ## Sandbox repair proof harness
 

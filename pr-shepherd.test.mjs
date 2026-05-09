@@ -8,6 +8,7 @@ import {
   AUTOMATIC_ACTION_CLASSES,
   appendActionLedgerEntry,
   buildConflictArtifactPayload,
+  buildConflictDiagnosisBundle,
   buildLiveRepairExecutionHarness,
   buildPostActionAuditEntry,
   buildRepairRehearsalApprovalPackage,
@@ -21,6 +22,7 @@ import {
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   buildFleetOperatorBrief,
+  isSafeDiagnosisHintCommand,
   buildVerifyGate,
   liveRepairApprovalState,
   multiTargetLiveRepairGateFailures,
@@ -1240,6 +1242,7 @@ test('automatic action explanations cover every action class without executing h
   const expectations = {
     [AUTOMATIC_ACTION_CLASSES.RECHECK]: { pushAllowed: false, writesArtifact: false },
     [AUTOMATIC_ACTION_CLASSES.DIAGNOSE]: { pushAllowed: false, writesArtifact: false },
+    [AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY]: { pushAllowed: false, writesArtifact: true },
     [AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE]: { pushAllowed: false, writesArtifact: false },
     [AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL]: { pushAllowed: false, writesArtifact: false },
     [AUTOMATIC_ACTION_CLASSES.CONFLICT_ARTIFACT]: { pushAllowed: false, writesArtifact: true },
@@ -1581,9 +1584,10 @@ test('conflict planner creates artifacts for assisted conflicts but only plans a
   assert.equal(assisted.pushAllowed, false);
 
   const humanOnly = planConflictAutomaticAction(classifyConflictSet(['pnpm-lock.yaml'], conflictPolicyTarget), ['pnpm-lock.yaml']);
-  assert.equal(humanOnly.actionClass, AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE);
+  assert.equal(humanOnly.actionClass, AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY);
   assert.equal(humanOnly.pushAllowed, false);
-  assert.equal(humanOnly.requiresOperatorApproval, true);
+  assert.equal(humanOnly.requiresOperatorApproval, false);
+  assert.equal(humanOnly.writesArtifact, true);
 });
 
 test('classifies lockfile conflict as humanOnly', () => {
@@ -1624,6 +1628,63 @@ test('conflict artifacts omit secrets and private worktree details', () => {
   const json = JSON.stringify(payload);
   assert.equal(json.includes('TOKEN_EXAMPLE_REDACT_ME'), false);
   assert.equal(json.includes('/private/'), false);
+});
+
+test('Phase G conflict diagnosis bundle is sanitized and diagnose-only', () => {
+  const target = {
+    ...conflictPolicyTarget,
+    worktreePath: '/private/worktree',
+    statePath: '/private/state.json',
+    focusedChecks: ['pnpm test extensions/telegram/src/outbound-adapter.test.ts'],
+    diagnosisHints: [{
+      path: 'extensions/telegram/src/**',
+      summary: 'Review Telegram outbound receipt mapping.',
+      commands: ['pnpm test extensions/telegram/src/outbound-adapter.test.ts', 'curl https://example.invalid'],
+    }],
+  };
+  const bundle = buildConflictDiagnosisBundle(
+    target,
+    { ...base, headRefName: 'feature', baseRefName: 'main', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', url: target.url },
+    { kind: 'dirty', checks: { failed: [], pending: [] } },
+    {},
+    {
+      now: new Date('2026-05-09T00:00:00Z'),
+      conflicts: ['extensions/telegram/src/outbound-adapter.ts'],
+      changedFiles: [{ filename: 'extensions/telegram/src/outbound-adapter.ts', status: 'modified', additions: 5, deletions: 2, changes: 7 }],
+      baseOid: 'base-a',
+    },
+  );
+  const json = JSON.stringify(bundle);
+  assert.equal(bundle.schema, 'pr-shepherd-conflict-diagnosis-bundle/v1');
+  assert.equal(bundle.diagnoseOnly, true);
+  assert.equal(bundle.pushAllowed, false);
+  assert.equal(bundle.mutatesBranch, false);
+  assert.equal(bundle.conflictPolicy.tier, 'codeAssisted');
+  assert.equal(bundle.diagnosisHints[0].commands.length, 1);
+  assert.equal(json.includes('TOKEN_EXAMPLE_REDACT_ME'), false);
+  assert.equal(json.includes('/private/'), false);
+});
+
+test('diagnosis hint validation allows read-only commands and blocks mutation/secrets', () => {
+  assert.equal(isSafeDiagnosisHintCommand('pnpm test extensions/telegram/src/outbound-adapter.test.ts'), true);
+  assert.equal(isSafeDiagnosisHintCommand('git diff --check'), true);
+  assert.equal(isSafeDiagnosisHintCommand('git push origin HEAD'), false);
+  assert.equal(isSafeDiagnosisHintCommand('curl https://example.invalid'), false);
+  assert.equal(isSafeDiagnosisHintCommand('printenv GITHUB_TOKEN'), false);
+
+  const cfg = {
+    targets: [validationTarget({
+      diagnosisHints: [
+        { path: 'src/**', summary: 'safe hint', commands: ['npm test src/example.test.ts'] },
+        { path: 'AGENTS.md', commands: ['npm test'] },
+        { path: 'src/**', commands: ['git push origin HEAD'] },
+      ],
+    })],
+  };
+  const report = validateConfigObject(cfg);
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
+  assert.match(report.errors.join('\n'), /not an allowed diagnose-only hint command/);
 });
 
 test('autoSafe CHANGELOG resolver preserves both sides and removes conflict markers', () => {
