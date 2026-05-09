@@ -327,21 +327,26 @@ it never runs live `repair`, creates standing timers, pushes, or carries approva
 
 ### Phase K rehearsal evidence digest
 
-Phase K turns completed Phase C/J dry-run rehearsal evidence into a compact, operator-readable digest. Use
+Phase K turns completed Phase C/J dry-run rehearsal evidence into a compact, operator-readable digest and a
+fail-closed `pr-shepherd-phase-d-candidate-gate/v1`. Use
 [`phase-k-rehearsal-evidence-digest.md`](examples/field-deploy/phase-k-rehearsal-evidence-digest.md) when the source
-rehearsal packet is already recorded and the next decision needs a sanitized evidence index rather than raw logs.
+rehearsal packet is already recorded, after `rehearse --target <id>`, and before preparing any Phase D operator
+packet. The digest schema is `pr-shepherd-rehearsal-evidence-digest/v1` and records only sanitized target, PR,
+expected/current refs, repair key, source evidence links, dry-run command summary, focused-check verdicts, check
+counts, approval-package summary, freshness, rollback note, gate outcomes, and evidence hygiene.
 
-The digest schema is `pr-shepherd-rehearsal-evidence-digest/v1` and records source evidence links, expected/current
-head and base refs, dry-run command summary, focused-check verdicts, gate outcomes, evidence hygiene, and exactly one
-next-lane recommendation: Phase D decision packet candidate, rerun Phase G/H, rerun Phase I, rerun Phase J, continue
-observation, or Block. It is always `dryRunEvidenceOnly=true`, `productionMutation=false`, `pushAllowed=false`,
-`mutatesBranch=false`, and `noLiveApproval=true`.
+It always remains evidence-only: `dryRunEvidenceOnly=true`, `productionMutation=false`, `pushAllowed=false`,
+`mutatesBranch=false`, and `noLiveApproval=true`. `candidateAllowed=true` means the rehearsal is eligible to become
+Phase D input; it is not live repair approval and still cannot bypass Phase D/E one-shot metadata, focused checks, push
+budget, expected-head `--force-with-lease`, or a fresh contamination check. Missing rehearsal package/ledger entries,
+non-dirty current PR state, stale or mismatched refs, expired evidence, missing strict focused checks, or
+runtime/bootstrap evidence (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or
+`.openclaw/**`) close as `Block` with exact repo-relative offending paths or blocked reasons.
 
 Phase K preserves the same ledger and contamination boundaries as earlier phases: post `Start` before reading or
 publishing digest evidence, close with exactly one of `PR: <url>`, `Done`, or `Block`, report `startCommentUrl` plus the
-matching terminal URL when available, and fail closed if branch or artifact evidence would include `AGENTS.md`,
-`SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`. It never approves live `repair`,
-creates timers, pushes, or carries approval into Phase D/E.
+matching terminal URL when available, and never approve live `repair`, create timers, push, or carry approval into
+Phase D/E.
 
 ## Sandbox repair proof harness
 

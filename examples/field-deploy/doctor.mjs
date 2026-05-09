@@ -255,11 +255,14 @@ function packageDoctor() {
   if (phaseKRehearsalEvidenceDigest) {
     check(/rehearsal evidence digest/i.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must name rehearsal evidence digest operations');
     check(/pr-shepherd-rehearsal-evidence-digest\/v1/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must document the digest packet schema');
+    check(/pr-shepherd-phase-d-candidate-gate\/v1/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must document the Phase D candidate gate schema');
     check(/Phase C\/J/.test(phaseKRehearsalEvidenceDigest) && /dry-run/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must consume Phase C/J dry-run evidence');
+    check(/rehearse --config config\.json --target <target-id>/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must name the target-specific rehearsal command');
     check(/expected\/current refs/i.test(phaseKRehearsalEvidenceDigest) || (/expected head\/base refs/i.test(phaseKRehearsalEvidenceDigest) && /current head\/base refs/i.test(phaseKRehearsalEvidenceDigest)), errors, 'Phase K runbook must compare expected and current refs');
     check(/evidence index/i.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must document the sanitized evidence index');
     check(/Phase D decision packet candidate/.test(phaseKRehearsalEvidenceDigest) && /rerun Phase G\/H/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must name safe next-lane recommendations');
     check(/dryRunEvidenceOnly=true/.test(phaseKRehearsalEvidenceDigest) && /pushAllowed=false/.test(phaseKRehearsalEvidenceDigest) && /mutatesBranch=false/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must keep digest evidence non-mutating');
+    check(/candidateAllowed=true/.test(phaseKRehearsalEvidenceDigest) && /does not approve live repair|does not authorize live repair|never approves live repair/i.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must keep the candidate gate separate from live approval');
     check(/must not run live `repair`|never approves live `repair`|never approves live repair/i.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must block live repair approval');
     check(/`Start`/.test(phaseKRehearsalEvidenceDigest) && /`PR: <url>`/.test(phaseKRehearsalEvidenceDigest) && /`Done`/.test(phaseKRehearsalEvidenceDigest) && /`Block`/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must preserve Start and terminal ledger markers');
     check(/startCommentUrl/.test(phaseKRehearsalEvidenceDigest) && /prUrl/.test(phaseKRehearsalEvidenceDigest) && /doneCommentUrl/.test(phaseKRehearsalEvidenceDigest) && /blockCommentUrl/.test(phaseKRehearsalEvidenceDigest), errors, 'Phase K runbook must require returned marker URLs');

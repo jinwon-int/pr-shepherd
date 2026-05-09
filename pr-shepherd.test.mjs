@@ -13,7 +13,9 @@ import {
   buildConflictArtifactPayload,
   buildConflictDiagnosisBundle,
   buildLiveRepairExecutionHarness,
+  buildPhaseDCandidateGate,
   buildPostActionAuditEntry,
+  buildRehearsalEvidenceDigest,
   buildRepairRehearsalApprovalPackage,
   buildRepairPlanHandoffFromDiagnosisBundle,
   buildReviewStateFeedback,
@@ -1191,6 +1193,51 @@ test('buildRepairRehearsalApprovalPackage renders target-specific approval evide
   assert.match(pkg.rollbackNote, /no branch mutation, no push/);
 });
 
+test('Phase K rehearsal digest records a fail-closed Phase D candidate gate', () => {
+  const target = validationTarget({ pr: 'owner/repo#1', url: 'https://github.com/owner/repo/pull/1' });
+  const pr = { ...base, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', headRefName: 'feature', baseRefName: 'main' };
+  const classification = { kind: 'dirty', checks: { failed: [], pending: [] } };
+  const plan = planAutomaticAction(target, {}, pr, classification, { dryRun: true, now: Date.parse('2026-05-08T07:00:00Z') });
+  const approvalPackage = buildRepairRehearsalApprovalPackage(target, pr, {}, plan, {
+    now: new Date('2026-05-08T07:00:00Z'),
+    repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY',
+    baseOid: 'base123',
+    classification: 'dirty',
+  });
+  const state = {
+    lastRepairRehearsal: {
+      at: '2026-05-08T07:00:00.000Z',
+      target: 'target-1',
+      repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY',
+      headRefOid: 'abc123',
+      baseOid: 'base123',
+      approvalPackage,
+    },
+    actionLedger: [{ actionClass: AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL, result: 'rehearsed', repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY' }],
+  };
+
+  const gate = buildPhaseDCandidateGate(target, pr, state, { classification, now: new Date('2026-05-08T07:05:00Z') });
+  assert.equal(gate.schema, 'pr-shepherd-phase-d-candidate-gate/v1');
+  assert.equal(gate.candidateAllowed, true);
+  assert.equal(gate.noLiveApproval, true);
+  assert.equal(gate.terminalLedgerMarker, 'Done');
+
+  const digest = buildRehearsalEvidenceDigest(target, pr, state, { classification, now: new Date('2026-05-08T07:05:00Z'), phaseDCandidateGate: gate });
+  assert.equal(digest.schema, 'pr-shepherd-rehearsal-evidence-digest/v1');
+  assert.equal(digest.phaseDCandidateGate.candidateAllowed, true);
+  assert.equal(digest.pushAllowed, false);
+  assert.equal(digest.nextStep.includes('Phase D operator packet'), true);
+
+  const contaminated = buildPhaseDCandidateGate(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T07:05:00Z'),
+    artifactEvidencePaths: ['.openclaw/workspace-state.json'],
+  });
+  assert.equal(contaminated.candidateAllowed, false);
+  assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['.openclaw/workspace-state.json']);
+  assert.match(contaminated.blockedReasons.join('\n'), /runtime\/bootstrap context paths/);
+});
+
 test('rehearse is an approval-gated dry-run repair alias that stops before git mutation', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-rehearse-'));
   try {
@@ -1216,6 +1263,7 @@ test('rehearse is an approval-gated dry-run repair alias that stops before git m
     assert.match(result.stdout, /action planned: repair-rehearsal/);
     assert.match(result.stdout, /dry-run stops before git mutation/);
     assert.match(result.stdout, /pr-shepherd-repair-rehearsal-approval\/v1/);
+    assert.match(result.stdout, /rehearsalEvidenceDigest/);
     assert.equal(existsSync(missingWorktree), false);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     assert.equal(state.lastKind, 'dirty');
@@ -1224,6 +1272,8 @@ test('rehearse is an approval-gated dry-run repair alias that stops before git m
     assert.equal(state.lastAutomaticActionExecution.actionClass, AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL);
     assert.equal(state.lastRepairRehearsal.approvalPackage.schema, 'pr-shepherd-repair-rehearsal-approval/v1');
     assert.equal(state.lastRepairRehearsal.approvalPackage.expectedRefs.repairKey, 'repair:abc123:base123:CONFLICTING:DIRTY');
+    assert.equal(state.lastRehearsalEvidenceDigest.schema, 'pr-shepherd-rehearsal-evidence-digest/v1');
+    assert.equal(state.lastRehearsalEvidenceDigest.phaseDCandidateGate.candidateAllowed, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1597,6 +1647,8 @@ test('automatic action planner records rehearsal before permitting gated live re
       repairKey: 'repair:abc123:base-a:CONFLICTING:DIRTY',
     }],
   };
+  state.lastRehearsalEvidenceDigest = buildRehearsalEvidenceDigest(target, pr, state, { classification, now: new Date(2000) });
+  state.lastRepairRehearsal.evidenceDigest = state.lastRehearsalEvidenceDigest;
   const live = planAutomaticAction(target, state, pr, classification, { dryRun: false, now: 2000 });
   assert.equal(live.actionClass, AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR);
   assert.equal(live.allowed, true);
@@ -1715,6 +1767,11 @@ test('Phase E execution harness records readiness, post-action audit shape, and 
     }],
     autoPushes: [],
   };
+  state.lastRehearsalEvidenceDigest = buildRehearsalEvidenceDigest(target, pr, state, {
+    classification,
+    now: new Date('2026-05-08T05:30:00Z'),
+  });
+  state.lastRepairRehearsal.evidenceDigest = state.lastRehearsalEvidenceDigest;
 
   const harness = buildLiveRepairExecutionHarness(target, pr, state, {
     classification,
