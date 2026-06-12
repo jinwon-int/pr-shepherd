@@ -764,6 +764,9 @@ test('status command reads state files without network access and summarizes the
   try {
     const statePath = join(dir, 'state.json');
     const configPath = join(dir, 'config.json');
+    // The spawned CLI computes 24h/48h observation windows from the real
+    // clock, so fixture timestamps must stay relative to now.
+    const recentAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     writeFileSync(statePath, JSON.stringify({
       disabled: false,
       lastKind: 'failed',
@@ -781,20 +784,20 @@ test('status command reads state files without network access and summarizes the
       },
       autoPushes: [{ at: new Date().toISOString(), from: 'old', to: 'new' }],
       actionLedger: [{
-        at: '2026-05-08T06:00:00Z',
+        at: recentAt,
         actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
         result: 'failed',
         approval: { id: 'approval-status-1', approvedBy: 'operator', scope: 'auto-safe-repair' },
         repairKey: 'repair:head-a:base-a:CONFLICTING:DIRTY',
       }],
       observationLedger: [{
-        at: '2026-05-08T06:00:00Z',
+        at: recentAt,
         kind: 'failed',
         actionClass: AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE,
         failedCount: 1,
         pendingCount: 1,
       }],
-      lastWarningAt: '2026-05-08T06:00:00Z',
+      lastWarningAt: recentAt,
       lastWarningKind: 'failed',
       lastDoctorWarnings: ['failed checks observed 1 times in 48h; operator review required before rehearsal'],
       nextRecommendedAction: 'operator review failed checks; keep branch mutation disabled',
@@ -821,7 +824,7 @@ test('status command reads state files without network access and summarizes the
     assert.equal(status.actionLedger.recent[0].result, 'failed');
     assert.equal(status.observationSummary.entries, 1);
     assert.equal(status.observationSummary.last48h.byKind.failed, 1);
-    assert.equal(status.recentRunAt, '2026-05-08T06:00:00Z');
+    assert.equal(status.recentRunAt, recentAt);
     assert.equal(status.lastWarningKind, 'failed');
     assert.deepEqual(status.doctorWarnings, ['failed checks observed 1 times in 48h; operator review required before rehearsal']);
     assert.equal(status.nextRecommendedAction, 'operator review failed checks; keep branch mutation disabled');

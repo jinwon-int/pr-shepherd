@@ -12,10 +12,23 @@ const shepherd = join(repoRoot, 'pr-shepherd.mjs');
 const targetId = 'sandbox-repair-proof';
 const headBranch = 'sandbox/repair-proof';
 
+// Isolate every sandbox git invocation (including the rebase/push the
+// shepherd performs inside the worktree) from host git configuration such as
+// forced commit signing, credential helpers, or url rewrites. The sandbox
+// must behave the same on operator laptops and managed CI runners.
+const gitIsolationEnv = {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_AUTHOR_NAME: 'PR Shepherd Sandbox',
+  GIT_AUTHOR_EMAIL: 'sandbox@example.invalid',
+  GIT_COMMITTER_NAME: 'PR Shepherd Sandbox',
+  GIT_COMMITTER_EMAIL: 'sandbox@example.invalid',
+};
+
 function run(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, {
     cwd: opts.cwd,
-    env: { ...process.env, ...(opts.env || {}) },
+    env: { ...process.env, ...gitIsolationEnv, ...(opts.env || {}) },
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,
   });
