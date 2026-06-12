@@ -14,8 +14,9 @@
     "proof:sandbox": "node examples/sandbox-repair-proof.mjs",
     "docs:policy": "node scripts/policy-docs.mjs generate",
     "docs:policy:check": "node scripts/policy-docs.mjs check",
+    "docs:links:check": "node scripts/check-links.mjs",
     "typecheck": "tsc",
-    "ci": "npm run check && npm run docs:policy:check && npm run typecheck && npm test"
+    "ci": "npm run check && npm run docs:policy:check && npm run docs:links:check && npm run typecheck && npm test"
   },
   "engines": {
     "node": ">=20"
