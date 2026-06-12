@@ -37,6 +37,14 @@ import {
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   buildFleetOperatorBrief,
+  githubApiBaseUrl,
+  githubProvider,
+  githubRestErrorMessage,
+  httpRequestSync,
+  mapGraphQlPullRequest,
+  restChangedFiles,
+  restPrView,
+  restRequest,
   getResolver,
   isSafeDiagnosisHintCommand,
   buildVerifyGate,
@@ -2372,6 +2380,126 @@ test('diagnosis hint validation allows read-only commands and blocks mutation/se
   assert.equal(report.ok, false);
   assert.match(report.errors.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
   assert.match(report.errors.join('\n'), /not an allowed diagnose-only hint command/);
+});
+
+
+function withEnv(overrides, fn) {
+  const saved = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    saved[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('github provider selection and API base URL respect target config and environment', () => {
+  withEnv({ PR_SHEPHERD_GITHUB_PROVIDER: undefined, PR_SHEPHERD_GITHUB_API_URL: undefined }, () => {
+    assert.equal(githubProvider({}), 'gh');
+    assert.equal(githubProvider({ github: { provider: 'rest' } }), 'rest');
+    assert.equal(githubApiBaseUrl({}), 'https://api.github.com');
+    assert.equal(githubApiBaseUrl({ github: { apiBaseUrl: 'https://ghe.example.invalid/api/v3/' } }), 'https://ghe.example.invalid/api/v3');
+  });
+  withEnv({ PR_SHEPHERD_GITHUB_PROVIDER: 'rest' }, () => {
+    assert.equal(githubProvider({}), 'rest');
+    assert.equal(githubProvider({ github: { provider: 'gh' } }), 'gh');
+  });
+});
+
+test('mapGraphQlPullRequest produces gh-shaped PR state that classifies identically', () => {
+  const node = {
+    number: 7, state: 'OPEN', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY',
+    mergedAt: null, headRefOid: 'head-7', headRefName: 'feature', baseRefName: 'main',
+    updatedAt: '2026-06-01T00:00:00Z', reviewDecision: 'REVIEW_REQUIRED', url: 'https://example.invalid/pr/7',
+    commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [
+      { __typename: 'CheckRun', name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://example.invalid/run/1' },
+      { __typename: 'StatusContext', context: 'lint', state: 'SUCCESS', targetUrl: null },
+    ] } } } }] },
+  };
+  const pr = mapGraphQlPullRequest(node);
+  assert.equal(pr.mergeable, 'CONFLICTING');
+  assert.equal(pr.statusCheckRollup.length, 2);
+  assert.equal(pr.statusCheckRollup[0].name, 'ci');
+  assert.equal(pr.statusCheckRollup[1].context, 'lint');
+  assert.equal(classifyPr(pr).kind, 'dirty');
+  assert.throws(() => mapGraphQlPullRequest(null), /did not include the requested pull request/);
+});
+
+test('rest provider fails closed without a token and reports rate limits clearly', () => {
+  withEnv({ GITHUB_TOKEN: undefined, GH_TOKEN: undefined }, () => {
+    assert.throws(() => restRequest({ owner: 'o', repo: 'r', number: 1 }, '/graphql'), /requires GITHUB_TOKEN or GH_TOKEN/);
+  });
+  const rateLimited = githubRestErrorMessage(403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1780000000' }, 'lookup');
+  assert.match(rateLimited, /rate limit/);
+  assert.match(rateLimited, /2026-/);
+  assert.match(githubRestErrorMessage(401, {}, 'lookup'), /GITHUB_TOKEN/);
+  withEnv({ GITHUB_TOKEN: 'test-token' }, () => {
+    let calls = 0;
+    assert.throws(() => restRequest({ owner: 'o', repo: 'r', number: 1 }, '/graphql', {}, () => {
+      calls += 1;
+      return { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1780000000' }, body: '' };
+    }), /rate limit/);
+    assert.equal(calls, 1, 'rate-limited requests are not retried');
+  });
+});
+
+test('restRequest retries transient server errors with configured delays and sends auth headers', () => {
+  withEnv({ GITHUB_TOKEN: 'test-token' }, () => {
+    const target = { owner: 'o', repo: 'r', number: 1, github: { retryDelaysMs: [0, 0, 0] } };
+    const seen = [];
+    const flaky = (request) => {
+      seen.push(request);
+      return seen.length < 3
+        ? { status: 502, headers: {}, body: '' }
+        : { status: 200, headers: {}, body: JSON.stringify({ data: { repository: { pullRequest: { number: 1, state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: 'h', headRefName: 'f', baseRefName: 'main', updatedAt: 'now', url: 'u', commits: { nodes: [] } } } } }) };
+    };
+    const pr = restPrView(target, flaky);
+    assert.equal(seen.length, 3);
+    assert.equal(pr.mergeable, 'MERGEABLE');
+    assert.equal(seen[0].headers.authorization, 'Bearer test-token');
+    assert.equal(seen[0].method, 'POST');
+    assert.match(seen[0].url, /\/graphql$/);
+    assert.equal(classifyPr(pr).kind, 'clean');
+  });
+});
+
+test('restChangedFiles paginates and stays best-effort on failure', () => {
+  withEnv({ GITHUB_TOKEN: 'test-token' }, () => {
+    const target = { owner: 'o', repo: 'r', number: 1, github: { retryDelaysMs: [] } };
+    const pageOne = Array.from({ length: 100 }, (_, i) => ({ filename: `a-${i}.txt` }));
+    const responses = [
+      { status: 200, headers: {}, body: JSON.stringify(pageOne) },
+      { status: 200, headers: {}, body: JSON.stringify([{ filename: 'tail.txt' }]) },
+    ];
+    const files = restChangedFiles(target, () => responses.shift());
+    assert.equal(files.length, 101);
+    assert.equal(files.at(-1).filename, 'tail.txt');
+    assert.deepEqual(restChangedFiles(target, () => ({ status: 404, headers: {}, body: '' })), []);
+  });
+});
+
+test('httpRequestSync performs a real fetch in a child process', () => {
+  const response = httpRequestSync({ url: 'data:text/plain,pr-shepherd-sync-fetch' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body, 'pr-shepherd-sync-fetch');
+});
+
+test('validate rejects malformed github provider config', () => {
+  const report = validateConfigObject({
+    targets: [validationTarget({ github: { provider: 'graphql-direct', apiBaseUrl: 'http://insecure.example', retryDelaysMs: [-1] } })],
+  });
+  assert.equal(report.ok, false);
+  const text = report.errors.join('\n');
+  assert.match(text, /github\.provider must be one of \[gh, rest\]/);
+  assert.match(text, /github\.apiBaseUrl must be an https URL/);
+  assert.match(text, /github\.retryDelaysMs must be an array of non-negative numbers/);
 });
 
 test('validate warns when a lock file lives in a world-writable shared directory', () => {

@@ -855,4 +855,18 @@ This repository is intentionally dependency-light. Runtime requirements:
 - GitHub CLI `gh` authenticated with read access to the watched PR and write access only when live repair/push is explicitly approved
 - `pnpm` only inside the watched OpenClaw worktree for focused verification
 
+### GitHub access providers
+
+Read-only GitHub access goes through a provider selected per target via `github.provider` (or the
+`PR_SHEPHERD_GITHUB_PROVIDER` environment variable):
+
+- `gh` (default): shells out to the authenticated `gh` CLI exactly as before.
+- `rest`: talks to the GitHub API directly using `GITHUB_TOKEN`/`GH_TOKEN` from the environment. PR state uses
+  the GraphQL endpoint so classifications match `gh pr view --json` field-for-field; changed-file summaries use
+  the paginated REST endpoint and stay best-effort. Transient 5xx errors are retried with backoff
+  (`github.retryDelaysMs` to tune), rate limits fail closed immediately with the reset time, and
+  `github.apiBaseUrl` supports GitHub Enterprise hosts.
+
+Both lanes are read-only; pushes never go through a provider and keep the existing `--force-with-lease` path.
+
 CI in this repository only runs syntax and unit fixture tests. It does not access GitHub PR state or push branches.

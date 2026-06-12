@@ -10,7 +10,7 @@ import { appendOperatorDecisionLedgerEntry, appendSupervisedRehearsalQueueLedger
 import { nextRecommendedAction, recordObservation, summarizeObservationLedger } from './lib/observation.mjs';
 import { acquireLock, assertMultiTargetLiveRepairAllowed, defaultState, loadConfig, run, runShell, selectTargets } from './lib/targets.mjs';
 import { buildFleetOperatorBrief, buildStatusRows, buildTargetIncidentSummary, targetStateTier } from './lib/fleet.mjs';
-import { ghPrChangedFiles, ghPrViewWithUnknownRecheck } from './lib/github.mjs';
+import { fetchChangedFiles, ghPrViewWithUnknownRecheck } from './lib/github.mjs';
 import { classifyPr } from './lib/classify.mjs';
 import { buildRepairRehearsalApprovalPackage, buildVerifyGate, consumeLiveRepairApproval, currentBaseOid, hasLiveRepairApproval } from './lib/approval.mjs';
 import { buildPhaseDOperatorPacket, buildRehearsalEvidenceDigest } from './lib/packets.mjs';
@@ -23,6 +23,7 @@ import { assertNoOpenClawRuntimeContextInBranch, buildConflictDiagnosisBundle, b
 export { PR_FIELDS, OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, DEFAULT_SITUATION_REPORT_EVERY_MS, MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS, MINOR_AUTO_SAFE_REPAIR_SCOPE, SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS, MINOR_AUTO_ROLLOUT_MODES, DEFAULT_MINOR_AUTO_POST_PUSH_OBSERVATION_WINDOW_MS, AUTOMATIC_ACTION_CLASSES, FLEET_TARGET_STATE_TIERS, DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS, DEFAULT_REPAIR_PLAN_HANDOFF_MAX_AGE_MS, DEFAULT_SUPERVISED_REHEARSAL_QUEUE_MAX_AGE_MS, DEFAULT_REHEARSAL_EVIDENCE_DIGEST_MAX_AGE_MS, DEFAULT_ACTION_LEDGER_LIMIT, DEFAULT_OBSERVATION_LEDGER_LIMIT, DEFAULT_STRICT_VERIFY_REQUIRED, DEFAULT_INCIDENT_BLOCK_THRESHOLD, PHASE_E_POST_ACTION_OUTCOMES, REVIEW_DECISION_OUTCOMES, findOpenClawRuntimeContextPaths } from './lib/policy.mjs';
 export { isSafeDiagnosisHintCommand, validateConfigObject } from './lib/config.mjs';
 export { getResolver, supportedResolverIds, minorAutoSafeResolverIds } from './lib/resolvers.mjs';
+export { githubProvider, githubApiBaseUrl, githubRestErrorMessage, httpRequestSync, mapGraphQlPullRequest, restRequest, restPrView, restChangedFiles, fetchPrState, fetchChangedFiles } from './lib/github.mjs';
 export { buildMinorAutoRepairGate, buildMinorAutoExecutionController, executeMinorAutoExecutionController } from './lib/minor-auto.mjs';
 export { redactLedgerValue, appendActionLedgerEntry, summarizeActionLedger } from './lib/ledger.mjs';
 export { buildReviewStateFeedback, appendOperatorDecisionLedgerEntry, buildSupervisedRehearsalQueuePacket, appendSupervisedRehearsalQueueLedgerEntry, summarizeOperatorDecisionLedger } from './lib/review-feedback.mjs';
@@ -104,7 +105,7 @@ function handleDiagnose(target, args = {}) {
   const state = { ...outcome.state };
   const pr = outcome.pr || {};
   const classification = outcome.classification || { kind: state.lastKind || 'unknown', checks: { failed: [], pending: [] } };
-  const changedFiles = outcome.pr ? ghPrChangedFiles(target) : [];
+  const changedFiles = outcome.pr ? fetchChangedFiles(target) : [];
   const conflicts = Array.isArray(state.lastConflictPaths) ? state.lastConflictPaths : [];
   const conflictInfo = classifyConflictSet(conflicts, target);
   const plan = buildAutomaticActionPlan(AUTOMATIC_ACTION_CLASSES.DIAGNOSE_ONLY, {
