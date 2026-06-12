@@ -37,6 +37,7 @@ import {
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   buildFleetOperatorBrief,
+  getResolver,
   isSafeDiagnosisHintCommand,
   buildVerifyGate,
   liveRepairApprovalState,
@@ -47,6 +48,8 @@ import {
   PR_FIELDS,
   resolveChangelogConflict,
   selectTargets,
+  supportedResolverIds,
+  SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS,
   summarizeActionLedger,
   summarizeOperatorDecisionLedger,
   summarizeObservationLedger,
@@ -2369,6 +2372,21 @@ test('diagnosis hint validation allows read-only commands and blocks mutation/se
   assert.equal(report.ok, false);
   assert.match(report.errors.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
   assert.match(report.errors.join('\n'), /not an allowed diagnose-only hint command/);
+});
+
+test('autoSafe resolver registry drives validation and the minor-auto allowlist', () => {
+  const resolver = getResolver('merge-changelog-top-entry');
+  assert.ok(resolver, 'built-in changelog resolver is registered');
+  assert.equal(resolver.minorAutoSafe, true);
+  assert.equal(typeof resolver.resolve, 'function');
+  assert.deepEqual([...SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS], supportedResolverIds().filter((id) => getResolver(id).minorAutoSafe));
+  const report = validateConfigObject({
+    targets: [validationTarget({
+      conflictPolicy: { autoSafe: [{ path: 'CHANGELOG.md', resolver: 'unknown-resolver' }], codeAssisted: [], humanOnly: [] },
+    })],
+  });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /resolver must be one of \[merge-changelog-top-entry\]/);
 });
 
 test('autoSafe CHANGELOG resolver preserves both sides and removes conflict markers', () => {

@@ -22,6 +22,7 @@ import { assertNoOpenClawRuntimeContextInBranch, buildConflictDiagnosisBundle, b
 // Public API re-exported for tests and embedders; implementation lives in lib/.
 export { PR_FIELDS, OPENCLAW_RUNTIME_CONTEXT_ROOT_FILES, DEFAULT_SITUATION_REPORT_EVERY_MS, MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS, MINOR_AUTO_SAFE_REPAIR_SCOPE, SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS, MINOR_AUTO_ROLLOUT_MODES, DEFAULT_MINOR_AUTO_POST_PUSH_OBSERVATION_WINDOW_MS, AUTOMATIC_ACTION_CLASSES, FLEET_TARGET_STATE_TIERS, DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS, DEFAULT_REPAIR_PLAN_HANDOFF_MAX_AGE_MS, DEFAULT_SUPERVISED_REHEARSAL_QUEUE_MAX_AGE_MS, DEFAULT_REHEARSAL_EVIDENCE_DIGEST_MAX_AGE_MS, DEFAULT_ACTION_LEDGER_LIMIT, DEFAULT_OBSERVATION_LEDGER_LIMIT, DEFAULT_STRICT_VERIFY_REQUIRED, DEFAULT_INCIDENT_BLOCK_THRESHOLD, PHASE_E_POST_ACTION_OUTCOMES, REVIEW_DECISION_OUTCOMES, findOpenClawRuntimeContextPaths } from './lib/policy.mjs';
 export { isSafeDiagnosisHintCommand, validateConfigObject } from './lib/config.mjs';
+export { getResolver, supportedResolverIds, minorAutoSafeResolverIds } from './lib/resolvers.mjs';
 export { buildMinorAutoRepairGate, buildMinorAutoExecutionController, executeMinorAutoExecutionController } from './lib/minor-auto.mjs';
 export { redactLedgerValue, appendActionLedgerEntry, summarizeActionLedger } from './lib/ledger.mjs';
 export { buildReviewStateFeedback, appendOperatorDecisionLedgerEntry, buildSupervisedRehearsalQueuePacket, appendSupervisedRehearsalQueueLedgerEntry, summarizeOperatorDecisionLedger } from './lib/review-feedback.mjs';
