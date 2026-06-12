@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "skipLibCheck": true,
+    "strict": false,
+    "types": ["node"]
+  },
+  "include": ["pr-shepherd.mjs", "lib/**/*.mjs", "scripts/**/*.mjs"]
+}
