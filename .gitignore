@@ -12,3 +12,6 @@ TOOLS.md
 HEARTBEAT.md
 IDENTITY.md
 .openclaw/
+
+# Operator-local config; copy config.example.json to config.json and keep it untracked.
+/config.json

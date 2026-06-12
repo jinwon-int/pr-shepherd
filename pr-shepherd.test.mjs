@@ -1451,7 +1451,7 @@ test('rehearse is an approval-gated dry-run repair alias that stops before git m
 });
 
 test('rehearse rejects push approval flags', () => {
-  const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'rehearse', '--config', 'config.json', '--allow-code-assisted-push'], {
+  const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'rehearse', '--config', 'config.example.json', '--allow-code-assisted-push'], {
     encoding: 'utf8',
   });
   assert.notEqual(result.status, 0);

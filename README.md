@@ -463,7 +463,9 @@ appended on replay, and ledger values are sanitized for secrets and configured p
 Safe check-only rollout:
 
 1. Install this repo on the operator host and configure `gh` with least privilege.
-2. Prepare `config.json`; keep tokens in auth tooling or environment, not in config.
+2. Copy `config.example.json` to `config.json` (untracked) and replace the `<worktree-root>`/`<state-root>`
+   placeholders with operator-local paths; keep tokens in auth tooling or environment, not in config, and never
+   commit the real `config.json`.
 3. Run `node pr-shepherd.mjs validate --config config.json`.
 4. Run `node pr-shepherd.mjs check --config config.json --all`.
 5. Rehearse repair without git mutation: `node pr-shepherd.mjs rehearse --config config.json --all`.
