@@ -2374,6 +2374,15 @@ test('diagnosis hint validation allows read-only commands and blocks mutation/se
   assert.match(report.errors.join('\n'), /not an allowed diagnose-only hint command/);
 });
 
+test('validate warns when a lock file lives in a world-writable shared directory', () => {
+  const sharedTmp = validateConfigObject({ targets: [validationTarget({ lockPath: '/tmp/pr-shepherd/lock-1.lock' })] });
+  assert.equal(sharedTmp.ok, true);
+  assert.match(sharedTmp.warnings.join('\n'), /lockPath is under a world-writable shared directory/);
+  assert.match(sharedTmp.warnings.join('\n'), /state-adjacent/);
+  const stateAdjacent = validateConfigObject({ targets: [validationTarget({ statePath: '/srv/pr-shepherd/state-1.json', lockPath: '/srv/pr-shepherd/lock-1.lock' })] });
+  assert.equal(stateAdjacent.warnings.filter((warning) => warning.includes('world-writable')).length, 0);
+});
+
 test('autoSafe resolver registry drives validation and the minor-auto allowlist', () => {
   const resolver = getResolver('merge-changelog-top-entry');
   assert.ok(resolver, 'built-in changelog resolver is registered');
