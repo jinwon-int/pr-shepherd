@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2500,6 +2500,61 @@ test('validate rejects malformed github provider config', () => {
   assert.match(text, /github\.provider must be one of \[gh, rest\]/);
   assert.match(text, /github\.apiBaseUrl must be an https URL/);
   assert.match(text, /github\.retryDelaysMs must be an array of non-negative numbers/);
+});
+
+
+test('event-trigger receiver only runs allowlisted read-only checks', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-event-trigger-'));
+  const argvLog = join(dir, 'argv.log');
+  const fakeBin = join(dir, 'fake-shepherd.mjs');
+  writeFileSync(fakeBin, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n`);
+  const port = 18000 + (process.pid % 2000);
+  const secret = 'event-secret-0123456789abcdef';
+  const child = spawn(process.execPath, [new URL('./examples/event-triggers/webhook-check-receiver.mjs', import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PR_SHEPHERD_EVENT_SECRET: secret,
+      PR_SHEPHERD_EVENT_CONFIG: join(dir, 'config.json'),
+      PR_SHEPHERD_EVENT_TARGETS: 'target-1',
+      PR_SHEPHERD_EVENT_PORT: String(port),
+      PR_SHEPHERD_EVENT_HOST: '127.0.0.1',
+      PR_SHEPHERD_EVENT_DEBOUNCE_MS: '60000',
+      PR_SHEPHERD_BIN: fakeBin,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((resolveReady, rejectReady) => {
+      const timer = setTimeout(() => rejectReady(new Error('receiver did not start')), 5000);
+      child.stdout.on('data', (data) => { if (String(data).includes('listening')) { clearTimeout(timer); resolveReady(); } });
+      child.on('exit', (code) => rejectReady(new Error(`receiver exited early (${code})`)));
+    });
+    const post = (headers, body) => fetch(`http://127.0.0.1:${port}/trigger`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const unauthorized = await post({ 'x-pr-shepherd-secret': 'wrong-secret-wrong-secret' }, { target: 'target-1' });
+    assert.equal(unauthorized.status, 401);
+    const forbidden = await post({ 'x-pr-shepherd-secret': secret }, { target: 'not-allowlisted' });
+    assert.equal(forbidden.status, 403);
+    const accepted = await post({ 'x-pr-shepherd-secret': secret }, { target: 'target-1' });
+    assert.equal(accepted.status, 202);
+    assert.equal((await accepted.json()).action, 'check-canary-started');
+    const debounced = await post({ 'x-pr-shepherd-secret': secret }, { target: 'target-1' });
+    assert.equal((await debounced.json()).action, 'debounced');
+    let lines = [];
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (existsSync(argvLog)) {
+        lines = readFileSync(argvLog, 'utf8').trim().split('\n').filter(Boolean);
+        if (lines.length > 0) break;
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+    assert.equal(lines.length, 1, 'exactly one one-shot check ran');
+    const argv = JSON.parse(lines[0]);
+    assert.equal(argv[0], 'check-canary');
+    assert.deepEqual(argv.slice(-2), ['--target', 'target-1']);
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('validate warns when a lock file lives in a world-writable shared directory', () => {

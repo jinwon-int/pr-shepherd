@@ -827,6 +827,11 @@ Notifier hook requirements:
 
 Run `check` every 5-10 minutes. Run `repair --dry-run` or live `repair` only after the worktree is prepared and operator policy is confirmed.
 
+To reduce detection latency between polls, [`examples/event-triggers/`](examples/event-triggers/README.md) ships an
+optional GitHub Actions ping workflow plus a dependency-free receiver that runs one extra read-only
+`check-canary` when the watched PR changes. Timers remain the reliability backstop; events never trigger
+rehearse/repair lanes.
+
 Example unit files are included but not installed:
 
 - `pr-shepherd@.service.example`
