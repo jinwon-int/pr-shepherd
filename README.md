@@ -119,6 +119,11 @@ post `Block`, and report the exact repo-relative path(s), including matches for 
 `TOOLS.md`, `HEARTBEAT.md`, `IDENTITY.md`, or `.openclaw/**`. Do not include the contents of those files in the
 ledger; path names and the blocking reason are enough.
 
+The authoritative denylist lives in code (`lib/policy.mjs`) and is rendered into
+[`docs/runtime-context-policy.md`](docs/runtime-context-policy.md) by `npm run docs:policy`. CI runs
+`npm run docs:policy:check`, which fails when the generated document is stale or when any markdown file in this
+repository enumerates the denylist partially, so documentation cannot drift from the enforced policy.
+
 ## Code-assisted operations and approval gates
 
 PR Shepherd is intended to assist a human operator, not to make broad autonomous code changes.
