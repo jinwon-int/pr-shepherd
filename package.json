@@ -8,7 +8,7 @@
     "pr-shepherd": "./pr-shepherd.mjs"
   },
   "scripts": {
-    "check": "node --check pr-shepherd.mjs && node --check examples/sandbox-repair-proof.mjs && node --check examples/field-deploy/doctor.mjs",
+    "check": "node --check pr-shepherd.mjs && for f in lib/*.mjs; do node --check \"$f\" || exit 1; done && node --check examples/sandbox-repair-proof.mjs && node --check examples/field-deploy/doctor.mjs",
     "test": "node --test pr-shepherd.test.mjs",
     "doctor:field-deploy": "node examples/field-deploy/doctor.mjs --config config.json --target openclaw-78261",
     "proof:sandbox": "node examples/sandbox-repair-proof.mjs",
