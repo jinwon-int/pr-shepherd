@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,6 +37,15 @@ import {
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   buildFleetOperatorBrief,
+  githubApiBaseUrl,
+  githubProvider,
+  githubRestErrorMessage,
+  httpRequestSync,
+  mapGraphQlPullRequest,
+  restChangedFiles,
+  restPrView,
+  restRequest,
+  getResolver,
   isSafeDiagnosisHintCommand,
   buildVerifyGate,
   liveRepairApprovalState,
@@ -47,6 +56,8 @@ import {
   PR_FIELDS,
   resolveChangelogConflict,
   selectTargets,
+  supportedResolverIds,
+  SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS,
   summarizeActionLedger,
   summarizeOperatorDecisionLedger,
   summarizeObservationLedger,
@@ -764,6 +775,9 @@ test('status command reads state files without network access and summarizes the
   try {
     const statePath = join(dir, 'state.json');
     const configPath = join(dir, 'config.json');
+    // The spawned CLI computes 24h/48h observation windows from the real
+    // clock, so fixture timestamps must stay relative to now.
+    const recentAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     writeFileSync(statePath, JSON.stringify({
       disabled: false,
       lastKind: 'failed',
@@ -781,20 +795,20 @@ test('status command reads state files without network access and summarizes the
       },
       autoPushes: [{ at: new Date().toISOString(), from: 'old', to: 'new' }],
       actionLedger: [{
-        at: '2026-05-08T06:00:00Z',
+        at: recentAt,
         actionClass: AUTOMATIC_ACTION_CLASSES.AUTO_SAFE_REPAIR,
         result: 'failed',
         approval: { id: 'approval-status-1', approvedBy: 'operator', scope: 'auto-safe-repair' },
         repairKey: 'repair:head-a:base-a:CONFLICTING:DIRTY',
       }],
       observationLedger: [{
-        at: '2026-05-08T06:00:00Z',
+        at: recentAt,
         kind: 'failed',
         actionClass: AUTOMATIC_ACTION_CLASSES.NOTIFY_ESCALATE,
         failedCount: 1,
         pendingCount: 1,
       }],
-      lastWarningAt: '2026-05-08T06:00:00Z',
+      lastWarningAt: recentAt,
       lastWarningKind: 'failed',
       lastDoctorWarnings: ['failed checks observed 1 times in 48h; operator review required before rehearsal'],
       nextRecommendedAction: 'operator review failed checks; keep branch mutation disabled',
@@ -821,7 +835,7 @@ test('status command reads state files without network access and summarizes the
     assert.equal(status.actionLedger.recent[0].result, 'failed');
     assert.equal(status.observationSummary.entries, 1);
     assert.equal(status.observationSummary.last48h.byKind.failed, 1);
-    assert.equal(status.recentRunAt, '2026-05-08T06:00:00Z');
+    assert.equal(status.recentRunAt, recentAt);
     assert.equal(status.lastWarningKind, 'failed');
     assert.deepEqual(status.doctorWarnings, ['failed checks observed 1 times in 48h; operator review required before rehearsal']);
     assert.equal(status.nextRecommendedAction, 'operator review failed checks; keep branch mutation disabled');
@@ -1448,7 +1462,7 @@ test('rehearse is an approval-gated dry-run repair alias that stops before git m
 });
 
 test('rehearse rejects push approval flags', () => {
-  const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'rehearse', '--config', 'config.json', '--allow-code-assisted-push'], {
+  const result = spawnSync(process.execPath, [new URL('./pr-shepherd.mjs', import.meta.url).pathname, 'rehearse', '--config', 'config.example.json', '--allow-code-assisted-push'], {
     encoding: 'utf8',
   });
   assert.notEqual(result.status, 0);
@@ -2366,6 +2380,205 @@ test('diagnosis hint validation allows read-only commands and blocks mutation/se
   assert.equal(report.ok, false);
   assert.match(report.errors.join('\n'), /OpenClaw runtime\/bootstrap context paths/);
   assert.match(report.errors.join('\n'), /not an allowed diagnose-only hint command/);
+});
+
+
+function withEnv(overrides, fn) {
+  const saved = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    saved[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('github provider selection and API base URL respect target config and environment', () => {
+  withEnv({ PR_SHEPHERD_GITHUB_PROVIDER: undefined, PR_SHEPHERD_GITHUB_API_URL: undefined }, () => {
+    assert.equal(githubProvider({}), 'gh');
+    assert.equal(githubProvider({ github: { provider: 'rest' } }), 'rest');
+    assert.equal(githubApiBaseUrl({}), 'https://api.github.com');
+    assert.equal(githubApiBaseUrl({ github: { apiBaseUrl: 'https://ghe.example.invalid/api/v3/' } }), 'https://ghe.example.invalid/api/v3');
+  });
+  withEnv({ PR_SHEPHERD_GITHUB_PROVIDER: 'rest' }, () => {
+    assert.equal(githubProvider({}), 'rest');
+    assert.equal(githubProvider({ github: { provider: 'gh' } }), 'gh');
+  });
+});
+
+test('mapGraphQlPullRequest produces gh-shaped PR state that classifies identically', () => {
+  const node = {
+    number: 7, state: 'OPEN', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY',
+    mergedAt: null, headRefOid: 'head-7', headRefName: 'feature', baseRefName: 'main',
+    updatedAt: '2026-06-01T00:00:00Z', reviewDecision: 'REVIEW_REQUIRED', url: 'https://example.invalid/pr/7',
+    commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [
+      { __typename: 'CheckRun', name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: 'https://example.invalid/run/1' },
+      { __typename: 'StatusContext', context: 'lint', state: 'SUCCESS', targetUrl: null },
+    ] } } } }] },
+  };
+  const pr = mapGraphQlPullRequest(node);
+  assert.equal(pr.mergeable, 'CONFLICTING');
+  assert.equal(pr.statusCheckRollup.length, 2);
+  assert.equal(pr.statusCheckRollup[0].name, 'ci');
+  assert.equal(pr.statusCheckRollup[1].context, 'lint');
+  assert.equal(classifyPr(pr).kind, 'dirty');
+  assert.throws(() => mapGraphQlPullRequest(null), /did not include the requested pull request/);
+});
+
+test('rest provider fails closed without a token and reports rate limits clearly', () => {
+  withEnv({ GITHUB_TOKEN: undefined, GH_TOKEN: undefined }, () => {
+    assert.throws(() => restRequest({ owner: 'o', repo: 'r', number: 1 }, '/graphql'), /requires GITHUB_TOKEN or GH_TOKEN/);
+  });
+  const rateLimited = githubRestErrorMessage(403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1780000000' }, 'lookup');
+  assert.match(rateLimited, /rate limit/);
+  assert.match(rateLimited, /2026-/);
+  assert.match(githubRestErrorMessage(401, {}, 'lookup'), /GITHUB_TOKEN/);
+  withEnv({ GITHUB_TOKEN: 'test-token' }, () => {
+    let calls = 0;
+    assert.throws(() => restRequest({ owner: 'o', repo: 'r', number: 1 }, '/graphql', {}, () => {
+      calls += 1;
+      return { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1780000000' }, body: '' };
+    }), /rate limit/);
+    assert.equal(calls, 1, 'rate-limited requests are not retried');
+  });
+});
+
+test('restRequest retries transient server errors with configured delays and sends auth headers', () => {
+  withEnv({ GITHUB_TOKEN: 'test-token' }, () => {
+    const target = { owner: 'o', repo: 'r', number: 1, github: { retryDelaysMs: [0, 0, 0] } };
+    const seen = [];
+    const flaky = (request) => {
+      seen.push(request);
+      return seen.length < 3
+        ? { status: 502, headers: {}, body: '' }
+        : { status: 200, headers: {}, body: JSON.stringify({ data: { repository: { pullRequest: { number: 1, state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: 'h', headRefName: 'f', baseRefName: 'main', updatedAt: 'now', url: 'u', commits: { nodes: [] } } } } }) };
+    };
+    const pr = restPrView(target, flaky);
+    assert.equal(seen.length, 3);
+    assert.equal(pr.mergeable, 'MERGEABLE');
+    assert.equal(seen[0].headers.authorization, 'Bearer test-token');
+    assert.equal(seen[0].method, 'POST');
+    assert.match(seen[0].url, /\/graphql$/);
+    assert.equal(classifyPr(pr).kind, 'clean');
+  });
+});
+
+test('restChangedFiles paginates and stays best-effort on failure', () => {
+  withEnv({ GITHUB_TOKEN: 'test-token' }, () => {
+    const target = { owner: 'o', repo: 'r', number: 1, github: { retryDelaysMs: [] } };
+    const pageOne = Array.from({ length: 100 }, (_, i) => ({ filename: `a-${i}.txt` }));
+    const responses = [
+      { status: 200, headers: {}, body: JSON.stringify(pageOne) },
+      { status: 200, headers: {}, body: JSON.stringify([{ filename: 'tail.txt' }]) },
+    ];
+    const files = restChangedFiles(target, () => responses.shift());
+    assert.equal(files.length, 101);
+    assert.equal(files.at(-1).filename, 'tail.txt');
+    assert.deepEqual(restChangedFiles(target, () => ({ status: 404, headers: {}, body: '' })), []);
+  });
+});
+
+test('httpRequestSync performs a real fetch in a child process', () => {
+  const response = httpRequestSync({ url: 'data:text/plain,pr-shepherd-sync-fetch' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body, 'pr-shepherd-sync-fetch');
+});
+
+test('validate rejects malformed github provider config', () => {
+  const report = validateConfigObject({
+    targets: [validationTarget({ github: { provider: 'graphql-direct', apiBaseUrl: 'http://insecure.example', retryDelaysMs: [-1] } })],
+  });
+  assert.equal(report.ok, false);
+  const text = report.errors.join('\n');
+  assert.match(text, /github\.provider must be one of \[gh, rest\]/);
+  assert.match(text, /github\.apiBaseUrl must be an https URL/);
+  assert.match(text, /github\.retryDelaysMs must be an array of non-negative numbers/);
+});
+
+
+test('event-trigger receiver only runs allowlisted read-only checks', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-shepherd-event-trigger-'));
+  const argvLog = join(dir, 'argv.log');
+  const fakeBin = join(dir, 'fake-shepherd.mjs');
+  writeFileSync(fakeBin, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n`);
+  const port = 18000 + (process.pid % 2000);
+  const secret = 'event-secret-0123456789abcdef';
+  const child = spawn(process.execPath, [new URL('./examples/event-triggers/webhook-check-receiver.mjs', import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PR_SHEPHERD_EVENT_SECRET: secret,
+      PR_SHEPHERD_EVENT_CONFIG: join(dir, 'config.json'),
+      PR_SHEPHERD_EVENT_TARGETS: 'target-1',
+      PR_SHEPHERD_EVENT_PORT: String(port),
+      PR_SHEPHERD_EVENT_HOST: '127.0.0.1',
+      PR_SHEPHERD_EVENT_DEBOUNCE_MS: '60000',
+      PR_SHEPHERD_BIN: fakeBin,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((resolveReady, rejectReady) => {
+      const timer = setTimeout(() => rejectReady(new Error('receiver did not start')), 5000);
+      child.stdout.on('data', (data) => { if (String(data).includes('listening')) { clearTimeout(timer); resolveReady(); } });
+      child.on('exit', (code) => rejectReady(new Error(`receiver exited early (${code})`)));
+    });
+    const post = (headers, body) => fetch(`http://127.0.0.1:${port}/trigger`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const unauthorized = await post({ 'x-pr-shepherd-secret': 'wrong-secret-wrong-secret' }, { target: 'target-1' });
+    assert.equal(unauthorized.status, 401);
+    const forbidden = await post({ 'x-pr-shepherd-secret': secret }, { target: 'not-allowlisted' });
+    assert.equal(forbidden.status, 403);
+    const accepted = await post({ 'x-pr-shepherd-secret': secret }, { target: 'target-1' });
+    assert.equal(accepted.status, 202);
+    assert.equal((await accepted.json()).action, 'check-canary-started');
+    const debounced = await post({ 'x-pr-shepherd-secret': secret }, { target: 'target-1' });
+    assert.equal((await debounced.json()).action, 'debounced');
+    let lines = [];
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (existsSync(argvLog)) {
+        lines = readFileSync(argvLog, 'utf8').trim().split('\n').filter(Boolean);
+        if (lines.length > 0) break;
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+    assert.equal(lines.length, 1, 'exactly one one-shot check ran');
+    const argv = JSON.parse(lines[0]);
+    assert.equal(argv[0], 'check-canary');
+    assert.deepEqual(argv.slice(-2), ['--target', 'target-1']);
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validate warns when a lock file lives in a world-writable shared directory', () => {
+  const sharedTmp = validateConfigObject({ targets: [validationTarget({ lockPath: '/tmp/pr-shepherd/lock-1.lock' })] });
+  assert.equal(sharedTmp.ok, true);
+  assert.match(sharedTmp.warnings.join('\n'), /lockPath is under a world-writable shared directory/);
+  assert.match(sharedTmp.warnings.join('\n'), /state-adjacent/);
+  const stateAdjacent = validateConfigObject({ targets: [validationTarget({ statePath: '/srv/pr-shepherd/state-1.json', lockPath: '/srv/pr-shepherd/lock-1.lock' })] });
+  assert.equal(stateAdjacent.warnings.filter((warning) => warning.includes('world-writable')).length, 0);
+});
+
+test('autoSafe resolver registry drives validation and the minor-auto allowlist', () => {
+  const resolver = getResolver('merge-changelog-top-entry');
+  assert.ok(resolver, 'built-in changelog resolver is registered');
+  assert.equal(resolver.minorAutoSafe, true);
+  assert.equal(typeof resolver.resolve, 'function');
+  assert.deepEqual([...SUPPORTED_MINOR_AUTO_SAFE_RESOLVERS], supportedResolverIds().filter((id) => getResolver(id).minorAutoSafe));
+  const report = validateConfigObject({
+    targets: [validationTarget({
+      conflictPolicy: { autoSafe: [{ path: 'CHANGELOG.md', resolver: 'unknown-resolver' }], codeAssisted: [], humanOnly: [] },
+    })],
+  });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /resolver must be one of \[merge-changelog-top-entry\]/);
 });
 
 test('autoSafe CHANGELOG resolver preserves both sides and removes conflict markers', () => {

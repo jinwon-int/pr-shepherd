@@ -1,0 +1,35 @@
+# Install this workflow in the repository (or fork) that hosts the watched PR
+# branch to ping the operator host when the PR changes, instead of waiting for
+# the next polling interval. It only notifies the receiver; the receiver runs
+# the read-only check-canary lane against operator-local config and state.
+#
+# Required repository secrets:
+#   PR_SHEPHERD_EVENT_URL     e.g. https://operator-host.example:8743/trigger
+#   PR_SHEPHERD_EVENT_SECRET  the same shared secret the receiver was started with
+#
+# Keep the polling timer installed as the reliability backstop; this workflow
+# only reduces detection latency. It must never invoke rehearse or repair.
+name: pr-shepherd-event-trigger
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  check_suite:
+    types: [completed]
+
+jobs:
+  notify-pr-shepherd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping PR Shepherd event receiver
+        env:
+          EVENT_URL: ${{ secrets.PR_SHEPHERD_EVENT_URL }}
+          EVENT_SECRET: ${{ secrets.PR_SHEPHERD_EVENT_SECRET }}
+          # Adjust to the target id configured in the operator's config.json.
+          TARGET_ID: openclaw-78261
+        run: |
+          curl --fail-with-body --max-time 15 \
+            -H "x-pr-shepherd-secret: ${EVENT_SECRET}" \
+            -H "content-type: application/json" \
+            -d "{\"target\":\"${TARGET_ID}\"}" \
+            "${EVENT_URL}"
