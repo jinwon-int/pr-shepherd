@@ -37,6 +37,19 @@ import {
   explainAutomaticActionPlan,
   findOpenClawRuntimeContextPaths,
   buildFleetOperatorBrief,
+  buildAutoMergeGate,
+  executeAutoMergeGate,
+  buildBoundedRetryController,
+  appendBoundedRetryAttempt,
+  diffFingerprint,
+  buildRiskyChangeApprovalPacket,
+  riskyApprovalState,
+  buildPreMutationDecision,
+  classifyChangedPathsRisk,
+  classifyPathRiskCategory,
+  MINOR_AUTO_MERGE_SCOPE,
+  BOUNDED_RETRY_SCOPE,
+  RISKY_CHANGE_APPROVAL_SCOPE,
   githubApiBaseUrl,
   githubProvider,
   githubRestErrorMessage,
@@ -2607,4 +2620,343 @@ test('autoSafe CHANGELOG resolver preserves both sides and removes conflict mark
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- Phase P/Q/R advanced automation lanes (#127/#128/#129) ---
+
+function autoMergeTarget(overrides = {}) {
+  return validationTarget({
+    headBranch: 'feature',
+    baseBranch: 'main',
+    automaticActions: {
+      autoMerge: {
+        enabled: true,
+        scope: 'minor-auto-merge',
+        mergeMethod: 'squash',
+        targetBranch: 'main',
+        requiredChecks: ['ci'],
+        pathAllowlist: ['CHANGELOG.md'],
+        resolverAllowlist: ['merge-changelog-top-entry'],
+        branchAllowlist: ['feature'],
+      },
+    },
+    ...overrides,
+  });
+}
+
+function autoMergeScenario(overrides = {}) {
+  const target = overrides.target || autoMergeTarget();
+  const pr = {
+    headRefName: 'feature',
+    baseRefName: 'main',
+    headRefOid: 'head-1',
+    mergeable: 'MERGEABLE',
+    mergeStateStatus: 'CLEAN',
+    reviewDecision: 'APPROVED',
+    statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    ...(overrides.pr || {}),
+  };
+  const state = {
+    minorAutoProvenance: {
+      scope: 'minor-auto-safe-repair',
+      target: 'target-1',
+      pushedHeadOid: 'head-1',
+      changedPaths: ['CHANGELOG.md'],
+      resolvers: ['merge-changelog-top-entry'],
+      riskClass: 'docs-or-text',
+    },
+    ...(overrides.state || {}),
+  };
+  const fields = {
+    changedPaths: ['CHANGELOG.md'],
+    currentHeadOid: 'head-1',
+    expectedHeadOid: 'head-1',
+    branchProtectionSatisfied: true,
+    ...(overrides.fields || {}),
+  };
+  return { target, pr, state, fields };
+}
+
+test('Phase P auto-merge gate is eligible for a clean proven minor-auto output', () => {
+  const { target, pr, state, fields } = autoMergeScenario();
+  const gate = buildAutoMergeGate(target, pr, state, fields);
+  assert.equal(gate.mergeAllowed, true);
+  assert.equal(gate.schema, 'pr-shepherd-auto-merge-gate/v1');
+  assert.equal(gate.lane, MINOR_AUTO_MERGE_SCOPE);
+  assert.equal(gate.mergeMethod, 'squash');
+  assert.equal(gate.decision.eligible, true);
+  assert.deepEqual(gate.decision.blockedReason, []);
+  assert.equal(gate.decision.riskClass, 'docs-or-text');
+  assert.equal(gate.terminalLedgerMarker, 'Done');
+});
+
+test('Phase P auto-merge gate fails closed on a stale head', () => {
+  const { target, pr, state, fields } = autoMergeScenario({ fields: { currentHeadOid: 'head-2' } });
+  const gate = buildAutoMergeGate(target, pr, state, fields);
+  assert.equal(gate.mergeAllowed, false);
+  assert.match(gate.blockedReasons.join('\n'), /expected head changed|provenance pushed head/);
+});
+
+test('Phase P auto-merge gate blocks pending and failed checks', () => {
+  const pending = autoMergeScenario({ pr: { mergeStateStatus: 'UNSTABLE', statusCheckRollup: [{ name: 'ci', status: 'IN_PROGRESS' }] } });
+  const pendingGate = buildAutoMergeGate(pending.target, pending.pr, pending.state, pending.fields);
+  assert.equal(pendingGate.mergeAllowed, false);
+  assert.match(pendingGate.blockedReasons.join('\n'), /pending, failed, or unknown checks|not clean/);
+
+  const failed = autoMergeScenario({ pr: { statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' }] } });
+  const failedGate = buildAutoMergeGate(failed.target, failed.pr, failed.state, failed.fields);
+  assert.equal(failedGate.mergeAllowed, false);
+});
+
+test('Phase P auto-merge gate blocks a missing required check', () => {
+  const target = autoMergeTarget({ automaticActions: { autoMerge: { enabled: true, scope: 'minor-auto-merge', mergeMethod: 'squash', targetBranch: 'main', requiredChecks: ['ci', 'lint'], pathAllowlist: ['CHANGELOG.md'], resolverAllowlist: ['merge-changelog-top-entry'], branchAllowlist: ['feature'] } } });
+  const { pr, state, fields } = autoMergeScenario();
+  const gate = buildAutoMergeGate(target, pr, state, fields);
+  assert.equal(gate.mergeAllowed, false);
+  assert.match(gate.blockedReasons.join('\n'), /required checks are not all successful: lint/);
+});
+
+test('Phase P auto-merge gate blocks risky paths', () => {
+  const { target, pr, state } = autoMergeScenario();
+  const gate = buildAutoMergeGate(target, pr, { ...state, minorAutoProvenance: { ...state.minorAutoProvenance, changedPaths: ['src/app.ts'] } }, { changedPaths: ['src/app.ts'], currentHeadOid: 'head-1', expectedHeadOid: 'head-1', branchProtectionSatisfied: true });
+  assert.equal(gate.mergeAllowed, false);
+  assert.match(gate.blockedReasons.join('\n'), /outside automaticActions\.autoMerge\.pathAllowlist|not minor-safe/);
+});
+
+test('Phase P auto-merge gate blocks reviewer objection and missing branch protection', () => {
+  const objection = autoMergeScenario({ pr: { reviewDecision: 'CHANGES_REQUESTED' } });
+  assert.equal(buildAutoMergeGate(objection.target, objection.pr, objection.state, objection.fields).mergeAllowed, false);
+
+  const signal = autoMergeScenario({ fields: { riskSignals: ['do-not-merge label'] } });
+  assert.match(buildAutoMergeGate(signal.target, signal.pr, signal.state, signal.fields).blockedReasons.join('\n'), /risky label\/comment\/check signal|reviewer objection/);
+
+  const noProtection = autoMergeScenario({ fields: { branchProtectionSatisfied: false } });
+  assert.match(buildAutoMergeGate(noProtection.target, noProtection.pr, noProtection.state, noProtection.fields).blockedReasons.join('\n'), /branch protection/);
+});
+
+test('Phase P auto-merge gate fails closed on contamination', () => {
+  const { target, pr, state } = autoMergeScenario();
+  const gate = buildAutoMergeGate(target, pr, state, { changedPaths: ['CHANGELOG.md', 'AGENTS.md'], currentHeadOid: 'head-1', expectedHeadOid: 'head-1', branchProtectionSatisfied: true });
+  assert.equal(gate.mergeAllowed, false);
+  assert.deepEqual(gate.evidenceHygiene.offendingRuntimeContextPaths, ['AGENTS.md']);
+});
+
+test('Phase P auto-merge is disabled by default', () => {
+  const target = validationTarget({ headBranch: 'feature', baseBranch: 'main' });
+  const { pr, state, fields } = autoMergeScenario();
+  const gate = buildAutoMergeGate(target, pr, state, fields);
+  assert.equal(gate.mergeAllowed, false);
+  assert.match(gate.blockedReasons.join('\n'), /enabled is not true/);
+});
+
+test('Phase P executeAutoMergeGate honors dry-run, block, recompute, and merge', () => {
+  const eligible = autoMergeScenario();
+  const gate = buildAutoMergeGate(eligible.target, eligible.pr, eligible.state, eligible.fields);
+  assert.equal(executeAutoMergeGate(gate, () => ({ merged: true }), { dryRun: true }).status, 'planned');
+  assert.equal(executeAutoMergeGate({ mergeAllowed: false, blockedReasons: ['nope'] }).status, 'blocked');
+  const staleRecompute = executeAutoMergeGate(gate, () => ({ merged: true }), { recompute: () => ({ mergeAllowed: false, blockedReasons: ['head moved'] }) });
+  assert.equal(staleRecompute.status, 'blocked');
+  assert.match(staleRecompute.reasons.join('\n'), /final-moment gate recomputation failed closed/);
+  let merged = false;
+  const ok = executeAutoMergeGate(gate, () => { merged = true; return { merged: true }; }, { recompute: () => gate });
+  assert.equal(ok.status, 'merged');
+  assert.equal(merged, true);
+});
+
+test('Phase P config validation rejects an incomplete enabled auto-merge policy', () => {
+  const report = validateConfigObject({ targets: [validationTarget({ automaticActions: { autoMerge: { enabled: true, scope: 'minor-auto-merge', pathAllowlist: ['src/app.ts'] } } })] });
+  assert.equal(report.ok, false);
+  const text = report.errors.join('\n');
+  assert.match(text, /autoMerge\.mergeMethod is required/);
+  assert.match(text, /autoMerge\.targetBranch is required/);
+  assert.match(text, /autoMerge\.requiredChecks must be a non-empty/);
+  assert.match(text, /autoMerge\.resolverAllowlist must be a non-empty/);
+  assert.match(text, /autoMerge\.branchAllowlist must be a non-empty/);
+  assert.match(text, /autoMerge\.pathAllowlist\[0\] is not minor-safe/);
+});
+
+function boundedRetryTarget(overrides = {}) {
+  return validationTarget({
+    headBranch: 'feature',
+    automaticActions: { boundedRetry: { enabled: true, scope: 'bounded-same-scope-retry', maxAttempts: 2, budgetPerDay: 4, ...(overrides.policy || {}) } },
+    ...(overrides.target || {}),
+  });
+}
+
+test('Phase Q bounded retry allows a first same-scope attempt and stops on a same-scope pass', () => {
+  const target = boundedRetryTarget();
+  const pr = { headRefName: 'feature', headRefOid: 'h1', baseRefOid: 'b1' };
+  const firstFail = buildBoundedRetryController(target, pr, {}, { changedPaths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.equal(firstFail.status, 'retry-allowed');
+  assert.equal(firstFail.retryAllowed, true);
+  assert.equal(firstFail.attemptNumber, 1);
+
+  const pass = buildBoundedRetryController(target, pr, {}, { changedPaths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: true, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.equal(pass.status, 'stopped-safe');
+  assert.equal(pass.safeStop, true);
+  assert.equal(pass.terminalLedgerMarker, 'Done');
+});
+
+test('Phase Q bounded retry stops safely at max-attempt exhaustion', () => {
+  const target = boundedRetryTarget({ policy: { maxAttempts: 1 } });
+  const pr = { headRefName: 'feature', headRefOid: 'h1' };
+  const state = {};
+  appendBoundedRetryAttempt(state, { changedPaths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], headBranch: 'feature', focusedChecksPassed: false });
+  const controller = buildBoundedRetryController(target, pr, state, { changedPaths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.equal(controller.status, 'stopped-safe');
+  assert.equal(controller.safeStop, true);
+  assert.match(controller.stopReason, /budget exhausted/);
+  assert.equal(controller.attemptsUsed, 1);
+});
+
+test('Phase Q bounded retry opens the circuit on drift, new file class, stale refs, objection, and contamination', () => {
+  const target = boundedRetryTarget();
+  const pr = { headRefName: 'feature', headRefOid: 'h1' };
+  const state = { boundedRetry: { originalScope: { paths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], riskClass: 'docs-or-text', headBranch: 'feature' }, attempts: [{ attempt: 1, scope: { paths: ['CHANGELOG.md'] } }] } };
+
+  const drift = buildBoundedRetryController(target, pr, state, { changedPaths: ['docs/other.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.equal(drift.status, 'circuit-open');
+  assert.equal(drift.circuitBreaker.open, true);
+  assert.equal(drift.terminalLedgerMarker, 'Block');
+
+  const newClass = buildBoundedRetryController(target, pr, {}, { changedPaths: ['src/app.ts'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.match(newClass.circuitBreaker.reasons.join('\n'), /new file class|risky change/);
+
+  const stale = buildBoundedRetryController(target, pr, {}, { changedPaths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h2' });
+  assert.match(stale.circuitBreaker.reasons.join('\n'), /stale refs/);
+
+  const objection = buildBoundedRetryController(target, { ...pr, reviewDecision: 'CHANGES_REQUESTED' }, {}, { changedPaths: ['CHANGELOG.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.match(objection.circuitBreaker.reasons.join('\n'), /reviewer objection/);
+
+  const contaminated = buildBoundedRetryController(target, pr, {}, { changedPaths: ['CHANGELOG.md', 'SOUL.md'], resolvers: ['merge-changelog-top-entry'], focusedChecksPassed: false, expectedHeadOid: 'h1', currentHeadOid: 'h1' });
+  assert.equal(contaminated.status, 'circuit-open');
+  assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['SOUL.md']);
+});
+
+test('Phase Q diffFingerprint is order-independent and config validation requires explicit limits', () => {
+  assert.equal(diffFingerprint(['b.md', 'a.md']), diffFingerprint(['a.md', 'b.md']));
+  assert.notEqual(diffFingerprint(['a.md']), diffFingerprint(['a.md', 'b.md']));
+  const report = validateConfigObject({ targets: [validationTarget({ automaticActions: { boundedRetry: { enabled: true, scope: 'bounded-same-scope-retry' } } })] });
+  assert.equal(report.ok, false);
+  assert.match(report.errors.join('\n'), /boundedRetry\.maxAttempts is required/);
+  assert.match(report.errors.join('\n'), /boundedRetry\.budgetPerDay is required/);
+  const tooMany = validateConfigObject({ targets: [validationTarget({ automaticActions: { boundedRetry: { enabled: true, scope: 'bounded-same-scope-retry', maxAttempts: 3, budgetPerDay: 1 } } })] });
+  assert.match(tooMany.errors.join('\n'), /boundedRetry\.maxAttempts is required and must be an integer between 1 and 2/);
+});
+
+function riskyTarget(overrides = {}) {
+  return validationTarget({
+    headBranch: 'feature',
+    focusedChecks: ['npm test'],
+    automaticActions: {
+      riskyChangeApproval: {
+        enabled: true,
+        scope: 'risky-change-approval',
+        approvalId: 'risky-1',
+        approvedBy: 'seo-jin-on',
+        approvedAt: '2026-06-01T00:00:00Z',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        branchAllowlist: ['feature'],
+        expectedHeadOid: 'h1',
+        ...(overrides.policy || {}),
+      },
+    },
+    ...(overrides.target || {}),
+  });
+}
+
+test('Phase R risky-change packet renders an approved one-shot packet', () => {
+  const target = riskyTarget();
+  const pr = { headRefName: 'feature', headRefOid: 'h1', baseRefName: 'main' };
+  const packet = buildRiskyChangeApprovalPacket(target, pr, {}, { changedPaths: ['src/app.ts'], currentHeadOid: 'h1' });
+  assert.equal(packet.schema, 'pr-shepherd-risky-change-approval-packet/v1');
+  assert.equal(packet.lane, RISKY_CHANGE_APPROVAL_SCOPE);
+  assert.equal(packet.pushAuthorized, true);
+  assert.equal(packet.status, 'approved-one-shot');
+  assert.equal(packet.oneShot, true);
+  assert.equal(packet.widensPolicy, false);
+  assert.equal(packet.riskClass, 'semantic-source');
+  assert.ok(packet.riskReasons.some((r) => r.why.includes('semantic')));
+  assert.deepEqual(packet.commandUnderConsideration.slice(0, 3), ['node', 'pr-shepherd.mjs', 'repair']);
+  assert.equal(packet.pushGuard.forceWithLease, 'feature:h1');
+  assert.ok(packet.requiredFocusedChecks.includes('npm test'));
+  assert.ok(Array.isArray(packet.rollbackPlan) && packet.rollbackPlan.length > 0);
+  assert.equal(packet.terminalLedgerMarker, 'Done');
+});
+
+test('Phase R risky-change packet is non-mutating and blocks missing/expired/reused/head-mismatch approval', () => {
+  const pr = { headRefName: 'feature', headRefOid: 'h1' };
+  const fields = { changedPaths: ['src/app.ts'], currentHeadOid: 'h1' };
+
+  const missing = buildRiskyChangeApprovalPacket(riskyTarget({ policy: { approvalId: undefined } }), pr, {}, fields);
+  assert.equal(missing.pushAuthorized, false);
+  assert.equal(missing.mutatesBranch, false);
+  assert.match(missing.blockedReasons.join('\n'), /approvalId is missing/);
+
+  const expired = buildRiskyChangeApprovalPacket(riskyTarget({ policy: { expiresAt: '2020-01-01T00:00:00Z' } }), pr, {}, fields);
+  assert.equal(expired.approval.state, 'expired');
+  assert.equal(expired.pushAuthorized, false);
+
+  const reused = buildRiskyChangeApprovalPacket(riskyTarget(), pr, { consumedLiveRepairApprovals: ['risky-1'] }, fields);
+  assert.equal(reused.approval.state, 'reused');
+
+  const headMismatch = buildRiskyChangeApprovalPacket(riskyTarget(), pr, {}, { changedPaths: ['src/app.ts'], currentHeadOid: 'h2' });
+  assert.equal(headMismatch.approval.state, 'head-mismatch');
+  assert.equal(headMismatch.pushAuthorized, false);
+});
+
+test('Phase R risky-change packet fails closed on contamination and supports custom rollback guidance', () => {
+  const target = riskyTarget();
+  const pr = { headRefName: 'feature', headRefOid: 'h1' };
+  const contaminated = buildRiskyChangeApprovalPacket(target, pr, {}, { changedPaths: ['src/app.ts', 'TOOLS.md'], currentHeadOid: 'h1' });
+  assert.equal(contaminated.packetAllowed, false);
+  assert.equal(contaminated.status, 'blocked');
+  assert.deepEqual(contaminated.evidenceHygiene.offendingRuntimeContextPaths, ['TOOLS.md']);
+
+  const custom = buildRiskyChangeApprovalPacket(target, pr, {}, { changedPaths: ['src/app.ts'], currentHeadOid: 'h1', rollbackPlan: ['revert one commit'] });
+  assert.deepEqual(custom.rollbackPlan, ['revert one commit']);
+});
+
+test('Phase R riskyApprovalState and config validation enforce scope and expiry', () => {
+  assert.equal(riskyApprovalState({ enabled: false }, {}, {}).state, 'disabled');
+  assert.equal(riskyApprovalState({ enabled: true }, {}, {}).state, 'missing');
+  const report = validateConfigObject({ targets: [validationTarget({ automaticActions: { riskyChangeApproval: { enabled: true } } })] });
+  assert.equal(report.ok, false);
+  const text = report.errors.join('\n');
+  assert.match(text, /riskyChangeApproval\.scope must be risky-change-approval when enabled/);
+  assert.match(text, /riskyChangeApproval\.expiresAt is required and must be an ISO-8601 timestamp when enabled/);
+  assert.match(text, /riskyChangeApproval\.approvalId is required/);
+  assert.match(text, /riskyChangeApproval\.approvedBy is required/);
+  assert.match(text, /riskyChangeApproval\.branchAllowlist must be a non-empty/);
+});
+
+test('shared pre-mutation decision and risk classification behave consistently', () => {
+  const blocked = buildPreMutationDecision({ blockedReason: ['a', 'a', 'b'], riskClass: 'semantic-source' });
+  assert.equal(blocked.eligible, false);
+  assert.deepEqual(blocked.blockedReason, ['a', 'b']);
+  assert.equal(blocked.schema, 'pr-shepherd-pre-mutation-decision/v1');
+  assert.equal(buildPreMutationDecision({}).eligible, true);
+
+  assert.equal(classifyPathRiskCategory('CHANGELOG.md'), 'docs-or-text');
+  assert.equal(classifyPathRiskCategory('src/app.ts'), 'semantic-source');
+  assert.equal(classifyPathRiskCategory('.github/workflows/ci.yml'), 'ci-workflow');
+  assert.equal(classifyPathRiskCategory('AGENTS.md'), 'runtime-bootstrap-context');
+  assert.equal(classifyPathRiskCategory('package-lock.json'), 'dependency-lockfile');
+  assert.equal(classifyChangedPathsRisk(['CHANGELOG.md', 'src/app.ts']).riskClass, 'semantic-source');
+  assert.equal(classifyChangedPathsRisk(['CHANGELOG.md']).riskClass, 'docs-or-text');
+});
+
+test('validate accepts fully configured advanced automation lanes', () => {
+  const report = validateConfigObject({
+    targets: [validationTarget({
+      headBranch: 'feature',
+      focusedChecks: ['npm test'],
+      automaticActions: {
+        autoMerge: { enabled: true, scope: 'minor-auto-merge', mergeMethod: 'squash', targetBranch: 'main', requiredChecks: ['ci'], pathAllowlist: ['CHANGELOG.md'], resolverAllowlist: ['merge-changelog-top-entry'], branchAllowlist: ['feature'] },
+        boundedRetry: { enabled: true, scope: 'bounded-same-scope-retry', maxAttempts: 2, budgetPerDay: 4 },
+        riskyChangeApproval: { enabled: true, scope: 'risky-change-approval', approvalId: 'r1', approvedBy: 'op', expiresAt: '2099-01-01T00:00:00Z', branchAllowlist: ['feature'] },
+      },
+    })],
+  });
+  assert.equal(report.ok, true, report.errors.join('\n'));
 });

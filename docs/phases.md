@@ -241,3 +241,52 @@ successful rollout step does not approve broad minor-auto repair, multi-target m
 execution, auto-merge, fix-until-green loops, provider sends, Gateway restarts, raw runtime/bootstrap evidence, or any
 future branch push; every live repair still needs a fresh Phase N controller run and final gates, and
 major/risky/semantic/ops-impact changes escalate to Seo Jin On approval.
+
+## Phase P minor-auto post-push auto-merge gate
+
+Phase P (advanced automation level L3) is the narrowest auto-merge lane. `buildAutoMergeGate(target, pr, state, fields)`
+produces a fail-closed `pr-shepherd-auto-merge-gate/v1` report that allows a merge ONLY when the branch is a proven
+minor-auto output (provenance present and matching the original target/path/resolver/risk scope), the expected head
+still matches, required checks are all clean with no pending/failed/unknown ambiguity, branch protection and review
+requirements are satisfied, the merge method and target branch are explicitly configured, changed paths and resolver
+stay inside the allowlist, there is no reviewer objection or risky label/comment/check signal, the circuit breaker is
+closed, and no runtime/bootstrap/secret/private-path evidence would be included. It is default-off and target-scoped;
+it never merges semantic/risky changes and never merges on ambiguity.
+
+The report embeds the shared pre-mutation decision object (`eligible`, `blockedReason[]`, `provenance`, `riskClass`,
+`policyId`, `expectedHead`, `checksSnapshot`, `auditPacketPath`). `executeAutoMergeGate(gate, handler, opts)` is the
+dispatcher: it refuses to merge unless the gate is allowed and, for a live merge, the recomputed final-moment gate is
+still allowed (`opts.recompute`), failing closed on any change. Configure under `automaticActions.autoMerge` with
+`scope=minor-auto-merge`, an explicit `mergeMethod`, `targetBranch`, `requiredChecks`, `pathAllowlist`,
+`resolverAllowlist`, and `branchAllowlist`.
+
+## Phase Q bounded same-scope retry controller
+
+Phase Q (advanced automation level L4) is a constrained retry lane, not an open-ended "fix until green" loop.
+`buildBoundedRetryController(target, pr, state, fields)` answers whether one more bounded attempt may run, returning a
+`pr-shepherd-bounded-retry-controller/v1` report. It is default-off, capped at 1-2 attempts, and restricted to the same
+target/branch/path/resolver/risk class. A circuit breaker opens (status `circuit-open`, terminal `Block`, route to a
+human) on semantic/scope drift, a new file class or changed risk class, stale refs or head/base mismatch, reviewer
+objection or a risky label/comment/check signal, post-push instability, or evidence contamination. Safe stopping —
+a same-scope focused-check pass or budget exhaustion — is a valid, non-error outcome (status `stopped-safe`, terminal
+`Done`). Each attempt records an attempt number, the original scope, a diff fingerprint, and the focused-check result
+via `appendBoundedRetryAttempt`. Configure under `automaticActions.boundedRetry` with `scope=bounded-same-scope-retry`,
+an explicit `maxAttempts` (1-2), and `budgetPerDay`.
+
+## Phase R risky-change approval-prepared packet
+
+Phase R (advanced automation level L5) makes risky auto-push technically possible but never default-automatic.
+`buildRiskyChangeApprovalPacket(target, pr, state, fields)` only PREPARES a non-mutating
+`pr-shepherd-risky-change-approval-packet/v1` packet: exact diff scope, risk class and why it is risky, the command argv
+under consideration, expected head/lease, the one-shot approval scope and expiry, required focused checks, a
+rollback/disable plan, the notification target, and the contamination-guard result. A single explicit, unexpired,
+branch-scoped, head-matched approval authorizes exactly one bounded push and cannot become a standing privilege or
+widen policy; reused, expired, head-mismatched, or missing approvals are blocked, and contamination fails the packet
+closed. Configure under `automaticActions.riskyChangeApproval` with `scope=risky-change-approval`, `approvalId`,
+`approvedBy`, `expiresAt`, and `branchAllowlist`.
+
+See [`phase-pqr-advanced-automation.md`](../examples/field-deploy/phase-pqr-advanced-automation.md) for the combined
+P/Q/R operator runbook and example config blocks.
+
+Phase S (unattended risky auto-push governance, #130) remains planning-only until Phase P/Q/R prove stable in the
+field; it is intentionally not implemented here.

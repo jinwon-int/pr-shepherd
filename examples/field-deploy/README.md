@@ -53,6 +53,8 @@ It is intentionally no-send by default: `notify.dryRun=true` in config and
   budgets, cooldowns, circuit breakers, post-push observation, rollback guidance, and dashboard summaries.
 - `phase-o-minor-auto-rollout-operations.md` — Phase O operator sequence for staged `minor-auto-safe-repair` rollout,
   one-target tier promotion, closeout markers, and evidence contamination guards.
+- `phase-pqr-advanced-automation.md` — Phase P/Q/R runbook for the default-off auto-merge gate, bounded same-scope
+  retry controller, and risky-change approval-prepared packet, with example config blocks and hard boundaries.
 
 ## Safe install sketch
 

@@ -21,6 +21,12 @@ import {
   MIN_LIVE_OPENCLAW_SITUATION_REPORT_EVERY_MS,
   DEFAULT_REPAIR_REHEARSAL_MAX_AGE_MS,
   DEFAULT_MINOR_AUTO_POST_PUSH_OBSERVATION_WINDOW_MS,
+  MINOR_AUTO_MERGE_SCOPE,
+  BOUNDED_RETRY_SCOPE,
+  RISKY_CHANGE_APPROVAL_SCOPE,
+  SUPPORTED_MERGE_METHODS,
+  MAX_BOUNDED_RETRY_ATTEMPTS,
+  RISK_CLASS_SEVERITY,
 } from '../lib/policy.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -59,6 +65,18 @@ ${MINOR_AUTO_ROLLOUT_MODES.map((m) => `- \`${m}\``).join('\n')}
 ## Fleet target state tiers
 
 ${FLEET_TARGET_STATE_TIERS.map((t) => `- \`${t}\``).join('\n')}
+
+## Advanced automation lane scopes (default off)
+
+| Lane | Scope | Notes |
+| --- | --- | --- |
+| Phase P auto-merge | \`${MINOR_AUTO_MERGE_SCOPE}\` | Only proven minor-auto outputs; merge methods: ${SUPPORTED_MERGE_METHODS.map((m) => `\`${m}\``).join(', ')} |
+| Phase Q bounded retry | \`${BOUNDED_RETRY_SCOPE}\` | Max ${MAX_BOUNDED_RETRY_ATTEMPTS} attempts, same scope only |
+| Phase R risky-change approval | \`${RISKY_CHANGE_APPROVAL_SCOPE}\` | One-shot, expiring, packet-prepared |
+
+Risk classes, most-risky first (only \`${RISK_CLASS_SEVERITY[RISK_CLASS_SEVERITY.length - 1]}\` may pass the auto-merge lane):
+
+${RISK_CLASS_SEVERITY.map((c) => `- \`${c}\``).join('\n')}
 
 ## Key defaults
 
