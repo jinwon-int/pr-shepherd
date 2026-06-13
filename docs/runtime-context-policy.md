@@ -45,6 +45,25 @@ contents.
 - `phase-d-ready`
 - `live-approved-once`
 
+## Advanced automation lane scopes (default off)
+
+| Lane | Scope | Notes |
+| --- | --- | --- |
+| Phase P auto-merge | `minor-auto-merge` | Only proven minor-auto outputs; merge methods: `merge`, `squash`, `rebase` |
+| Phase Q bounded retry | `bounded-same-scope-retry` | Max 2 attempts, same scope only |
+| Phase R risky-change approval | `risky-change-approval` | One-shot, expiring, packet-prepared |
+
+Risk classes, most-risky first (only `docs-or-text` may pass the auto-merge lane):
+
+- `runtime-bootstrap-context`
+- `security-auth-config`
+- `ci-workflow`
+- `dependency-lockfile`
+- `semantic-source`
+- `structured-data`
+- `unclassified`
+- `docs-or-text`
+
 ## Key defaults
 
 | Constant | Value |
