@@ -11,4 +11,9 @@ This tool is designed to fail closed:
 - merged PRs disable future runs
 - state and lock files should live outside the repository
 
-Report security issues through the private `jinwon-int` operational channel.
+Report security issues by opening a minimal maintainer-contact issue with no sensitive details, or by using an already established private maintainer channel. Share secrets, exploit details, or private logs only after a private route is confirmed.
+
+
+## Visibility and release boundary
+
+Public source visibility, release/tag/package publication, production deployment, provider or Telegram sends, database mutation, credential movement, and history rewrite are separate approval-gated actions.

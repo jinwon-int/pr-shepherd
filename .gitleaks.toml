@@ -1,0 +1,7 @@
+title = "pr-shepherd public-readiness gitleaks allowlist"
+
+[allowlist]
+description = "Allow redaction-unit-test fixture strings in pr-shepherd.test.mjs; tests synthesize fake credentials to verify sanitization."
+paths = [
+  'pr-shepherd.test.mjs',
+]

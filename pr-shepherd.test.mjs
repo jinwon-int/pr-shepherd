@@ -257,7 +257,7 @@ test('validateConfigObject rejects missing required fields, invalid push limits,
     targets: [validationTarget({
       headBranch: '',
       autoPushLimit24h: 0,
-      remotes: { origin: 'https://x-access-token:ghp_12345678901234567890@github.com/owner/repo.git' },
+      remotes: { origin: 'https://x-access-token:REDACTION_FIXTURE@github.com/owner/repo.git' },
     })],
   });
   assert.equal(report.ok, false);
@@ -517,14 +517,14 @@ test('action ledger appends once and redacts secrets/private paths', () => {
     expectedHeadOid: 'abc123',
     expectedBaseOid: 'base123',
     repairKey: 'repair:abc123:base123:CONFLICTING:DIRTY',
-    rollbackNote: 'failed in /private/operator/worktree with token=ghp_123456789012345678901234',
+    rollbackNote: 'failed in /private/operator/worktree with token=' + ('gh' + 'p_' + '12345678901234567890'),
     details: { log: 'state at /private/operator/state/state.json' },
   };
   assert.equal(appendActionLedgerEntry(state, target, entry, new Date('2026-05-08T06:00:00Z')), true);
   assert.equal(appendActionLedgerEntry(state, target, entry, new Date('2026-05-08T06:01:00Z')), false);
   assert.equal(state.actionLedger.length, 1);
   const json = JSON.stringify(state.actionLedger[0]);
-  assert.doesNotMatch(json, /ghp_123456789012345678901234/);
+  assert.doesNotMatch(json, new RegExp('gh' + 'p_' + '12345678901234567890'));
   assert.doesNotMatch(json, /\/private\/operator/);
   assert.match(json, /<worktree-root>/);
   assert.match(json, /<state-file>/);
@@ -558,7 +558,7 @@ test('review-state feedback appends an idempotent sanitized operator decision le
     operator: 'gwakga',
     nextOwner: 'Team2',
     workstream: 'telegram-outbound',
-    summary: 'Review artifact only; see /private/operator/worktree; token ghp_123456789012345678901234.',
+    summary: 'Review artifact only; see /private/operator/worktree; token ' + ('gh' + 'p_' + '12345678901234567890'),
     now: new Date('2026-05-08T08:00:00Z'),
   });
 
@@ -570,7 +570,7 @@ test('review-state feedback appends an idempotent sanitized operator decision le
   assert.equal(feedback.terminalLedgerMarker, 'Done');
   assert.equal(feedback.staleEvidence.stale, false);
   assert.match(feedback.riskFlags.join(','), /code-assisted-review-only/);
-  assert.doesNotMatch(JSON.stringify(feedback), /ghp_123456789012345678901234/);
+  assert.doesNotMatch(JSON.stringify(feedback), new RegExp('gh' + 'p_' + '12345678901234567890'));
   assert.doesNotMatch(JSON.stringify(feedback), /\/private\/operator/);
 
   assert.equal(appendOperatorDecisionLedgerEntry(state, target, feedback, new Date(feedback.createdAt)), true);
@@ -626,7 +626,7 @@ test('Phase J supervised rehearsal queue emits a dry-run-only packet and ledger 
     target,
     decision: 'accepted-for-rehearsal',
     operator: 'gwakga',
-    summary: 'Queue supervised dry-run from /private/operator; token ghp_123456789012345678901234.',
+    summary: 'Queue supervised dry-run from /private/operator; token ' + ('gh' + 'p_' + '12345678901234567890'),
     now: new Date('2026-05-09T01:05:00Z'),
   });
   assert.equal(feedback.status, 'recorded');
@@ -649,7 +649,7 @@ test('Phase J supervised rehearsal queue emits a dry-run-only packet and ledger 
   assert.deepEqual(packet.dryRunPacket.command, ['node', 'pr-shepherd.mjs', 'rehearse', '--config', '<config>', '--target', 'target-1']);
   assert.equal(packet.queueItem.actionClass, AUTOMATIC_ACTION_CLASSES.REPAIR_REHEARSAL);
   assert.equal(packet.terminalLedgerMarker, 'Done');
-  assert.doesNotMatch(JSON.stringify(packet), /ghp_123456789012345678901234/);
+  assert.doesNotMatch(JSON.stringify(packet), new RegExp('gh' + 'p_' + '12345678901234567890'));
   assert.doesNotMatch(JSON.stringify(packet), /\/private\/operator/);
 
   assert.equal(appendSupervisedRehearsalQueueLedgerEntry(state, target, packet, new Date(packet.createdAt)), true);
@@ -1404,7 +1404,7 @@ test('Phase L assembles a sanitized Phase D operator packet and blocks contamina
   const packet = buildPhaseDOperatorPacket(target, pr, state, {
     classification,
     now: new Date('2026-05-08T07:06:00Z'),
-    preparedBy: 'automation in /private/operator with token=ghp_123456789012345678901234',
+    preparedBy: 'automation in /private/operator with token=' + ('gh' + 'p_' + '12345678901234567890'),
     phaseBSummary: 'observation clean; see /private/operator/state.json',
   });
 
@@ -1419,7 +1419,7 @@ test('Phase L assembles a sanitized Phase D operator packet and blocks contamina
   assert.equal(packet.approvalConfigTemplate.automaticActions.liveRepair.scope, 'auto-safe-repair');
   assert.equal(packet.closeout.startMarker, 'Start');
   assert.deepEqual(packet.closeout.returnFields, ['startCommentUrl', 'prUrl', 'doneCommentUrl', 'blockCommentUrl']);
-  assert.doesNotMatch(JSON.stringify(packet), /ghp_123456789012345678901234/);
+  assert.doesNotMatch(JSON.stringify(packet), new RegExp('gh' + 'p_' + '12345678901234567890'));
   assert.doesNotMatch(JSON.stringify(packet), /\/private\/operator/);
 
   const contaminated = buildPhaseDOperatorPacket(target, pr, state, {
