@@ -12,8 +12,8 @@ jobs:
       matrix:
         node-version: ['20', '22', '24']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: jinwon-int/github-workflows/actions/checkout@3b20bdaac0a4ba33dbeaa1dd105f1a05d381d636 # central Node24
+      - uses: jinwon-int/github-workflows/actions/setup-node@3b20bdaac0a4ba33dbeaa1dd105f1a05d381d636 # central Node24
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
