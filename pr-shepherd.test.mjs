@@ -2960,3 +2960,48 @@ test('validate accepts fully configured advanced automation lanes', () => {
   });
   assert.equal(report.ok, true, report.errors.join('\n'));
 });
+
+test('redaction consumes complete Authorization credentials and preserves adjacent context', async () => {
+  const { redact } = await import('./lib/ledger.mjs');
+  for (const scheme of ['Bearer', 'Basic', 'token']) {
+    const result = redact(`Authorization: ${scheme} synthetic-credential\nstatus=401`);
+    assert.ok(!result.includes('synthetic-credential'));
+    assert.match(result, /status=401/);
+  }
+  assert.equal(redact('authorization = Bearer synthetic-value, status=401'), 'authorization = [REDACTED], status=401');
+});
+
+test('redaction recognizes fine-grained and classic GitHub tokens without a label', async () => {
+  const { redact } = await import('./lib/ledger.mjs');
+  for (const prefix of ['github' + '_pat_', 'gh' + 'p_', 'gh' + 'o_', 'gh' + 's_', 'gh' + 'u_', 'gh' + 'r_']) {
+    const token = prefix + 'synthetic_value_123';
+    assert.equal(redact(`failed ${token} done`), 'failed [REDACTED_GITHUB_TOKEN] done');
+  }
+});
+
+test('redaction handles quoted secret values with spaces and escaped quotes', async () => {
+  const { redact } = await import('./lib/ledger.mjs');
+  const input = JSON.stringify({ Authorization: 'Bearer synthetic value', password: 'two "secret" words', status: 'failed' });
+  assert.deepEqual(JSON.parse(redact(input)), { Authorization: '[REDACTED]', password: '[REDACTED]', status: 'failed' });
+  assert.equal(redact("secret='two words' attempts=2"), "secret='[REDACTED]' attempts=2");
+});
+
+test('structured credentials are redacted recursively including non-string values', async () => {
+  const { redactLedgerValue } = await import('./lib/ledger.mjs');
+  const input = { headers: { Authorization: 'Bearer synthetic' }, data: [
+    { access_token: 'synthetic', refreshToken: 'synthetic', apiKey: 123, client_secret: { value: 'synthetic' } },
+  ], password: ['synthetic'], token_count: 14, authorizationStatus: 'required', status: false };
+  const original = structuredClone(input);
+  assert.deepEqual(redactLedgerValue(input), { headers: { Authorization: '[REDACTED]' }, data: [
+    { access_token: '[REDACTED]', refreshToken: '[REDACTED]', apiKey: '[REDACTED]', client_secret: '[REDACTED]' },
+  ], password: '[REDACTED]', token_count: 14, authorizationStatus: 'required', status: false });
+  assert.deepEqual(input, original);
+});
+
+test('credential redaction still removes configured private paths and URL passwords', async () => {
+  const { redactLedgerValue } = await import('./lib/ledger.mjs');
+  const value = { log: 'https://user:synthetic@example.test /private/fixture token=synthetic' };
+  const result = redactLedgerValue(value, { privatePaths: ['/private/fixture'] });
+  assert.ok(!JSON.stringify(result).includes('synthetic'));
+  assert.match(result.log, /<private-path-1>/);
+});
