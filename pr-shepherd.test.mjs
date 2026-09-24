@@ -75,6 +75,8 @@ import {
   summarizeOperatorDecisionLedger,
   summarizeObservationLedger,
   validateConfigObject,
+  isSafeGitBranchName,
+  urlEmbedsUserinfoWithPassword,
 } from './pr-shepherd.mjs';
 
 const base = {
@@ -268,6 +270,33 @@ test('validateConfigObject rejects missing required fields, invalid push limits,
   const observationReport = validateConfigObject({ targets: [validationTarget({ observation: { ledgerLimit: 0 } })] });
   assert.equal(observationReport.ok, false);
   assert.match(observationReport.errors.join('\n'), /observation\.ledgerLimit must be a positive integer/);
+});
+
+test('validateConfigObject rejects branch names that git would parse as options or refspec tricks', () => {
+  for (const bad of ['--upload-pack=touch /tmp/pwned', '-x', 'feature..main', 'feat ure', 'a@{1}', 'refs/heads/', 'x.lock', 'a//b']) {
+    const report = validateConfigObject({ targets: [validationTarget({ headBranch: bad })] });
+    assert.equal(report.ok, false, bad);
+    assert.match(report.errors.join('\n'), /targets\[0\]\.headBranch is not a safe git branch name/, bad);
+  }
+  const baseReport = validateConfigObject({ targets: [validationTarget({ baseBranch: '--upload-pack=id' })] });
+  assert.match(baseReport.errors.join('\n'), /targets\[0\]\.baseBranch is not a safe git branch name/);
+  for (const good of ['main', 'feature/foo-1', 'release-2026.09', 'user/topic_2', 'v1.2.3']) {
+    assert.equal(isSafeGitBranchName(good), true, good);
+    assert.equal(validateConfigObject({ targets: [validationTarget({ headBranch: good })] }).ok, true, good);
+  }
+  assert.equal(isSafeGitBranchName(''), false);
+  assert.equal(isSafeGitBranchName(null), false);
+});
+
+test('urlEmbedsUserinfoWithPassword keeps the secret heuristic and stays linear on hostile input', () => {
+  assert.equal(urlEmbedsUserinfoWithPassword('https://user:REDACTION_FIXTURE@github.com/o/r.git'), true);
+  assert.equal(urlEmbedsUserinfoWithPassword('https://github.com/o/r.git'), false);
+  assert.equal(urlEmbedsUserinfoWithPassword('https://github.com/o/r:x@y'), false);
+  assert.equal(urlEmbedsUserinfoWithPassword('https://user@github.com/o/r.git'), false);
+  const hostile = `https://${'a:'.repeat(20000)}`;
+  const started = Date.now();
+  assert.equal(urlEmbedsUserinfoWithPassword(hostile), false);
+  assert.ok(Date.now() - started < 200, 'must not backtrack polynomially');
 });
 
 test('validateConfigObject rejects duplicate target ids and enabled state or lock paths', () => {

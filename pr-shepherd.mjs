@@ -3,7 +3,7 @@ import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUTOMATIC_ACTION_CLASSES, MINOR_AUTO_SAFE_REPAIR_SCOPE, assertNoOpenClawRuntimeContextPaths, findOpenClawRuntimeContextPaths } from './lib/policy.mjs';
 import { parseArgs } from './lib/cli-args.mjs';
-import { loadJson, saveJson, validateConfigObject } from './lib/config.mjs';
+import { assertSafeGitBranchName, loadJson, saveJson, validateConfigObject } from './lib/config.mjs';
 import { buildMinorAutoExecutionController, minorAutoCircuitBreaker } from './lib/minor-auto.mjs';
 import { appendActionLedgerEntry, appendPlanLedgerEntry, approvalMetadata, redact, redactForLedgerString } from './lib/ledger.mjs';
 import { appendOperatorDecisionLedgerEntry, appendSupervisedRehearsalQueueLedgerEntry, buildReviewStateFeedback, buildSupervisedRehearsalQueuePacket, summarizeOperatorDecisionLedger } from './lib/review-feedback.mjs';
@@ -25,7 +25,7 @@ export { buildPreMutationDecision, classifyPathRiskCategory, classifyChangedPath
 export { buildAutoMergeGate, executeAutoMergeGate, minorAutoProvenance } from './lib/auto-merge.mjs';
 export { buildBoundedRetryController, appendBoundedRetryAttempt, diffFingerprint } from './lib/retry-controller.mjs';
 export { buildRiskyChangeApprovalPacket, riskyApprovalState } from './lib/risky-packet.mjs';
-export { isSafeDiagnosisHintCommand, validateConfigObject } from './lib/config.mjs';
+export { isSafeDiagnosisHintCommand, isSafeGitBranchName, urlEmbedsUserinfoWithPassword, validateConfigObject } from './lib/config.mjs';
 export { getResolver, supportedResolverIds, minorAutoSafeResolverIds } from './lib/resolvers.mjs';
 export { githubProvider, githubApiBaseUrl, githubRestErrorMessage, httpRequestSync, mapGraphQlPullRequest, restRequest, restPrView, restChangedFiles, fetchPrState, fetchChangedFiles } from './lib/github.mjs';
 export { buildMinorAutoRepairGate, buildMinorAutoExecutionController, executeMinorAutoExecutionController } from './lib/minor-auto.mjs';
@@ -316,6 +316,10 @@ function handleRehearsalQueue(args = {}) {
 }
 
 function handleRepair(target, dryRun, opts = {}) {
+  // Every git call below takes these as positional arguments; a name that
+  // parses as a git option must never get that far (CodeQL #4–#7).
+  assertSafeGitBranchName(target.headBranch, 'headBranch');
+  assertSafeGitBranchName(target.baseBranch, 'baseBranch');
   const unlock = acquireLock(target.lockPath, target.staleLockMs || 0);
   try {
     const { state, pr, classification } = handleCheck(target);
