@@ -317,9 +317,12 @@ function handleRehearsalQueue(args = {}) {
 
 function handleRepair(target, dryRun, opts = {}) {
   // Every git call below takes these as positional arguments; a name that
-  // parses as a git option must never get that far (CodeQL #4–#7).
-  assertSafeGitBranchName(target.headBranch, 'headBranch');
-  assertSafeGitBranchName(target.baseBranch, 'baseBranch');
+  // parses as a git option must never get that far (CodeQL #4–#7). Bind
+  // the validated values to locals and use only those at the git sinks —
+  // re-reading target.* later would hand git an unchecked value again.
+  const headBranch = assertSafeGitBranchName(target.headBranch, 'headBranch');
+  const baseBranch = assertSafeGitBranchName(target.baseBranch, 'baseBranch');
+  if (headBranch.startsWith('-') || baseBranch.startsWith('-')) throw new Error('branch name must not look like a git option');
   const unlock = acquireLock(target.lockPath, target.staleLockMs || 0);
   try {
     const { state, pr, classification } = handleCheck(target);
@@ -472,8 +475,8 @@ function handleRepair(target, dryRun, opts = {}) {
     state.lastAutomaticActionExecution = executeAutomaticActionPlan(automaticPlan);
 
     ensureWorktree(target);
-    run('git', ['fetch', 'upstream', target.baseBranch], { cwd: target.worktreePath });
-    const baseOid = run('git', ['rev-parse', `upstream/${target.baseBranch}`], { cwd: target.worktreePath }).stdout.trim();
+    run('git', ['fetch', 'upstream', baseBranch], { cwd: target.worktreePath });
+    const baseOid = run('git', ['rev-parse', `upstream/${baseBranch}`], { cwd: target.worktreePath }).stdout.trim();
     state.lastSeenBaseOid = baseOid;
     const repairKey = repairAttemptKey(pr, baseOid);
     const postFetchPlan = planAutomaticAction(target, state, { ...pr, baseRefOid: baseOid }, classification, { dryRun: false, now: Date.now() });
@@ -513,12 +516,12 @@ function handleRepair(target, dryRun, opts = {}) {
       return;
     }
 
-    run('git', ['fetch', 'origin', `${target.headBranch}:${target.headBranch}`], { cwd: target.worktreePath, allowFailure: true });
-    run('git', ['fetch', 'origin', target.headBranch], { cwd: target.worktreePath });
-    const remoteHead = run('git', ['rev-parse', `origin/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim();
-    run('git', ['checkout', '-B', target.headBranch, `origin/${target.headBranch}`], { cwd: target.worktreePath });
+    run('git', ['fetch', 'origin', `${headBranch}:${headBranch}`], { cwd: target.worktreePath, allowFailure: true });
+    run('git', ['fetch', 'origin', headBranch], { cwd: target.worktreePath });
+    const remoteHead = run('git', ['rev-parse', `origin/${headBranch}`], { cwd: target.worktreePath }).stdout.trim();
+    run('git', ['checkout', '-B', headBranch, `origin/${headBranch}`], { cwd: target.worktreePath });
     let resolvedConflictInfo = null;
-    const rebase = run('git', ['rebase', `upstream/${target.baseBranch}`], { cwd: target.worktreePath, allowFailure: true });
+    const rebase = run('git', ['rebase', `upstream/${baseBranch}`], { cwd: target.worktreePath, allowFailure: true });
     if (rebase.status !== 0) {
       const conflicts = runShell('git diff --name-only --diff-filter=U', target.worktreePath, { allowFailure: true }).stdout.trim().split('\n').filter(Boolean);
       const contextConflicts = findOpenClawRuntimeContextPaths(conflicts);
@@ -604,13 +607,13 @@ function handleRepair(target, dryRun, opts = {}) {
     }
 
     runFocusedChecks(target);
-    const changedPaths = run('git', ['diff', '--name-only', `upstream/${target.baseBranch}...HEAD`], { cwd: target.worktreePath }).stdout
+    const changedPaths = run('git', ['diff', '--name-only', `upstream/${baseBranch}...HEAD`], { cwd: target.worktreePath }).stdout
       .trim()
       .split('\n')
       .filter(Boolean);
-    assertNoOpenClawRuntimeContextInBranch(target, `upstream/${target.baseBranch}`);
+    assertNoOpenClawRuntimeContextInBranch(target, `upstream/${baseBranch}`);
 
-    const ls = run('git', ['ls-remote', 'origin', `refs/heads/${target.headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
+    const ls = run('git', ['ls-remote', 'origin', `refs/heads/${headBranch}`], { cwd: target.worktreePath }).stdout.trim().split(/\s+/)[0];
     if (postFetchPlan.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE) {
       const controller = buildMinorAutoExecutionController(target, { ...pr, baseRefOid: baseOid }, state, {
         now: Date.now(),
@@ -658,7 +661,7 @@ function handleRepair(target, dryRun, opts = {}) {
       }
     }
     if (ls !== remoteHead) throw new Error(`remote head changed; refusing push. expected ${remoteHead}, got ${ls}`);
-    run('git', ['push', `--force-with-lease=${target.headBranch}:${remoteHead}`, 'origin', `HEAD:${target.headBranch}`], { cwd: target.worktreePath });
+    run('git', ['push', `--force-with-lease=${headBranch}:${remoteHead}`, 'origin', `HEAD:${headBranch}`], { cwd: target.worktreePath });
     const newHead = run('git', ['rev-parse', 'HEAD'], { cwd: target.worktreePath }).stdout.trim();
     const pushedAt = new Date();
     const minorAutoLane = postFetchPlan.lane === MINOR_AUTO_SAFE_REPAIR_SCOPE;
