@@ -293,10 +293,12 @@ test('urlEmbedsUserinfoWithPassword keeps the secret heuristic and stays linear 
   assert.equal(urlEmbedsUserinfoWithPassword('https://github.com/o/r.git'), false);
   assert.equal(urlEmbedsUserinfoWithPassword('https://github.com/o/r:x@y'), false);
   assert.equal(urlEmbedsUserinfoWithPassword('https://user@github.com/o/r.git'), false);
-  const hostile = `https://${'a:'.repeat(20000)}`;
-  const started = Date.now();
-  assert.equal(urlEmbedsUserinfoWithPassword(hostile), false);
-  assert.ok(Date.now() - started < 200, 'must not backtrack polynomially');
+  assert.equal(urlEmbedsUserinfoWithPassword('see https://user:REDACTION_FIXTURE@host/x and http://plain.example'), true);
+  for (const hostile of [`https://${'a:'.repeat(20000)}`, 'http://'.repeat(20000), `${'http://!'.repeat(10000)}@`]) {
+    const started = Date.now();
+    assert.equal(urlEmbedsUserinfoWithPassword(hostile), false, hostile.slice(0, 20));
+    assert.ok(Date.now() - started < 200, 'must not scan quadratically');
+  }
 });
 
 test('validateConfigObject rejects duplicate target ids and enabled state or lock paths', () => {
