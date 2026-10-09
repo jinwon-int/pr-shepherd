@@ -2977,6 +2977,34 @@ test('shared pre-mutation decision and risk classification behave consistently',
   assert.equal(classifyChangedPathsRisk(['CHANGELOG.md']).riskClass, 'docs-or-text');
 });
 
+test('agent instruction files at any depth are never docs-or-text (#151)', async () => {
+  const { changedPathsAreMinorSafe } = await import('./lib/decision.mjs');
+  const { minorAutoPathRiskReason } = await import('./lib/minor-auto.mjs');
+  const agentPaths = [
+    'packages/foo/AGENTS.md',
+    '.claude/skills/deploy/SKILL.md',
+    'CLAUDE.md',
+    'packages/bar/claude.md',
+    '.codex/prompts/review.md',
+    '.claude/settings.json',
+    'skills/x/SKILL.md',
+    // Basenames match case-insensitively on purpose: a case-insensitive
+    // filesystem loads agents.md as AGENTS.md, so fail closed.
+    'docs/agents.md',
+  ];
+  for (const path of agentPaths) {
+    assert.equal(classifyPathRiskCategory(path), 'runtime-bootstrap-context', path);
+    assert.match(String(minorAutoPathRiskReason(path)), /approval|runtime/, path);
+    assert.equal(changedPathsAreMinorSafe(['CHANGELOG.md', path]), false, path);
+  }
+  // Ordinary documentation keeps the minor-safe class in both lanes.
+  for (const path of ['docs/guide.md', 'README.md', 'packages/foo/README.md', 'CHANGELOG.md', 'docs/claude-setup.md']) {
+    assert.equal(classifyPathRiskCategory(path), 'docs-or-text', path);
+    assert.equal(minorAutoPathRiskReason(path), null, path);
+  }
+  assert.equal(changedPathsAreMinorSafe(['docs/guide.md', 'README.md']), true);
+});
+
 test('validate accepts fully configured advanced automation lanes', () => {
   const report = validateConfigObject({
     targets: [validationTarget({
